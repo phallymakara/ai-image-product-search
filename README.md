@@ -15,7 +15,6 @@ The system leverages **Azure AI Vision** to analyze images (tags, objects, OCR) 
 * Match against product database
 * Return top 3 similar products
 
----
 
 ## Business Use Cases
 
@@ -24,7 +23,6 @@ The system leverages **Azure AI Vision** to analyze images (tags, objects, OCR) 
 * Distributor product verification
 * Field sales product identification 
 
----
 
 ## Tech Stack
 
@@ -35,7 +33,6 @@ The system leverages **Azure AI Vision** to analyze images (tags, objects, OCR) 
 * Automation: Azure Function / Power Automate
 * Database: Azure SQL / SharePoint / Dataverse 
 
----
 
 ## Core Features
 
@@ -64,11 +61,6 @@ The system leverages **Azure AI Vision** to analyze images (tags, objects, OCR) 
 
 * Store image + results for future reference 
 
----
-
-
-
----
 
 ## Project Structure
 
@@ -83,7 +75,6 @@ ai-visual-product-search/
 └── README.md
 ```
 
----
 
 ## Getting Started
 
@@ -94,7 +85,6 @@ git clone https://github.com/phallymakara/ai-visual-product-search.git
 cd ai-visual-product-search
 ```
 
----
 
 ### 2. Setup Backend
 
@@ -104,7 +94,6 @@ pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
----
 
 ### 3. Configure Azure
 
@@ -120,7 +109,6 @@ VISION_ENDPOINT=your_endpoint
 VISION_KEY=your_key
 ```
 
----
 
 ### 4. Run Application
 
@@ -128,7 +116,6 @@ VISION_KEY=your_key
 * Upload image via API or Power App
 * View results from `/result/{imageId}`
 
----
 
 ## Matching Logic (Simplified)
 
@@ -145,7 +132,6 @@ Score =
 
 * PHALLY MAKARA
 
----
 
 ## All rights reserved.
 
