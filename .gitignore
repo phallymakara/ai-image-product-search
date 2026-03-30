@@ -1,0 +1,14 @@
+# Environment / Secrets
+.env
+.env.*
+*.env
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv/
+
+# OS Files
+.DS_Store
+Thumbs.db
