@@ -128,7 +128,5 @@ Score =
 Copyright (c) 2026 PHALLY MAKARA
 
 - This project and all associated files are the intellectual property of PHALLY MAKARA and Team Member.
-
 - Unauthorized use, reproduction, or distribution of this project is \*\*strictly prohibited and may result in legal action.
-
 - For permission requests, please contact the author directly. Contact: phallymakara01@example.com
