@@ -112,14 +112,12 @@ VISION_KEY=your_key
 
 ```text
 Score =
-  0.4 × tag similarity +
-  0.3 × OCR similarity +
-  0.3 × brand match
+  0.4 × tag similarity + 0.3 × OCR similarity + 0.3 × brand match
 ```
 
 ---
 
-## 👨 Author
+## Author
 
 - PHALLY MAKARA
 
@@ -128,5 +126,5 @@ Score =
 Copyright (c) 2026 PHALLY MAKARA
 
 - This project and all associated files are the intellectual property of PHALLY MAKARA and Team Member.
-- Unauthorized use, reproduction, or distribution of this project is \*\*strictly prohibited and may result in legal action.
+- Unauthorized use, reproduction, or distribution of this project is **strictly prohibited** and may result in legal action.
 - For permission requests, please contact the author directly. Contact: phallymakara01@example.com

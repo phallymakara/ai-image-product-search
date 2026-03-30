@@ -1,18 +1,11 @@
 fastapi
 uvicorn
 python-multipart
+requests
+python-dotenv
 
 # Azure Storage
 azure-storage-blob
 
-# Azure AI Vision (for next step)
-azure-ai-vision
-
-# Environment variables
-python-dotenv
-
-# Optional (recommended for HTTP requests/debugging)
-requests
-
-
-python-dotenv
+# Azure Cosmos DB
+azure-cosmos
