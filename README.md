@@ -111,8 +111,7 @@ VISION_KEY=your_key
 ## Matching Logic (Simplified)
 
 ```text
-Score =
-  0.4 × tag similarity + 0.3 × OCR similarity + 0.3 × brand match
+Score = 0.4 × tag similarity + 0.3 × OCR similarity + 0.3 × brand match
 ```
 
 ---
