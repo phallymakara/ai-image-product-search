@@ -8,8 +8,29 @@ venv/
 env/
 ENV/
 .venv/
+
+# Python Cache / Build
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Azure Functions
+.azurefunctions/
+bin/
+obj/
+local.settings.json  # contains secrets (VERY IMPORTANT)
+
+# VS Code / IDE
+.vscode/
+.idea/
 
 # OS Files
 .DS_Store
 Thumbs.db
+
+# Upload / Temp Files
+backend/uploads/
+*.tmp
+*.temp
