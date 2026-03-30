@@ -45,3 +45,4 @@ async def upload_image(user_id: str, file: UploadFile = File(...)):
         "imageUrl": url,
         "status": "uploaded to blob"
     }
+
