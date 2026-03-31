@@ -8,6 +8,8 @@ import os
 import requests
 import logging
 import hashlib
+from datetime import datetime
+from collections import defaultdict
 from thefuzz import fuzz
 
 # Load environment variables
@@ -32,6 +34,7 @@ COSMOS_CONTAINER_NAME = os.getenv("COSMOS_CONTAINER_NAME", os.getenv("COSMOS_CON
 # Clients initialization
 blob_service_client = None
 container = None
+search_history_container = None
 
 try:
     if STORAGE_CONNECTION_STRING:
@@ -43,6 +46,10 @@ try:
         container = database.create_container_if_not_exists(
             id=COSMOS_CONTAINER_NAME,
             partition_key=PartitionKey(path="/category")
+        )
+        search_history_container = database.create_container_if_not_exists(
+            id="SearchHistory",
+            partition_key=PartitionKey(path="/userId")
         )
 except Exception as e:
     logging.error(f"Failed to initialize Azure clients: {str(e)}")
@@ -234,75 +241,180 @@ async def upload_image(
 
 
 @app.post("/search")
-async def search_similar_product(file: UploadFile = File(...)):
+async def search_similar_product(user_id: str, file: UploadFile = File(...)):
     """
-    Search with Score = 0.4*tags + 0.3*ocr + 0.3*brands
+    Search with Score = 0.4*tags + 0.3*ocr + 0.3*brands.
+    Logs search history even if no results are found.
     """
     if not container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
 
     file_bytes = await file.read()
+    search_id = f"S{str(uuid.uuid4())[:7]}"
 
-    # 1. Analyze search image
+    # 1. Upload search image for history preview (optional)
+    search_image_url = None
+    if blob_service_client:
+        try:
+            blob_path = f"searches/{user_id}/{search_id}.jpg"
+            blob_client = blob_service_client.get_blob_client(container=STORAGE_CONTAINER_NAME, blob=blob_path)
+            blob_client.upload_blob(file_bytes, overwrite=True)
+            search_image_url = blob_client.url
+        except Exception as e:
+            logging.error(f"Failed to upload search image: {str(e)}")
+
+    # 2. Analyze search image
     analysis_result = analyze_image(file_bytes)
     ocr_text = ocr_image(file_bytes).lower()
     
-    search_tags = [t["name"] for t in extract_tags(analysis_result)]
+    search_tags_data = extract_tags(analysis_result)
+    search_tags = [t["name"] for t in search_tags_data]
     search_brands = [b.lower() for b in extract_brands(analysis_result)]
 
-    logging.info(f"SEARCH DEBUG - Tags: {search_tags}")
-    logging.info(f"SEARCH DEBUG - Brands: {search_brands}")
-    logging.info(f"SEARCH DEBUG - OCR: {ocr_text[:50]}...")
+    # Identify search category
+    search_category = "uncategorized"
+    categories = analysis_result.get("categories", [])
+    if categories:
+        raw_cat = categories[0].get("name", "")
+        search_category = raw_cat.split("_")[0] if "_" in raw_cat else raw_cat
+    elif search_tags:
+        search_category = search_tags[0]
+
+    # 3. Candidate Retrieval & Scoring
+    top_matches = []
+    total_results = 0
+    
+    if search_tags or search_brands:
+        query = (
+            "SELECT * FROM c WHERE "
+            "EXISTS(SELECT VALUE t FROM t IN c.tags WHERE ARRAY_CONTAINS(@tags, t.name)) OR "
+            "EXISTS(SELECT VALUE b FROM b IN c.brands WHERE ARRAY_CONTAINS(@brands, b))"
+        )
+        
+        try:
+            db_results = list(container.query_items(
+                query=query,
+                parameters=[
+                    {"name": "@tags", "value": search_tags},
+                    {"name": "@brands", "value": [b.capitalize() for b in search_brands]}
+                ],
+                enable_cross_partition_query=True
+            ))
+            
+            scored_results = []
+            for product in db_results:
+                prod_tags = [t["name"] for t in product.get("tags", [])]
+                common_tags = set(search_tags) & set(prod_tags)
+                tag_score = len(common_tags) / len(set(search_tags) | set(prod_tags)) if (set(search_tags) | set(prod_tags)) else 0
+                
+                prod_brands = [b.lower() for b in product.get("brands", [])]
+                brand_match = 1.0 if (set(search_brands) & set(prod_brands)) else 0.0
+                
+                prod_ocr = product.get("ocr_text", "").lower()
+                prod_name = product.get("name", "").lower()
+                ocr_score = max(
+                    fuzz.partial_ratio(ocr_text, prod_ocr),
+                    fuzz.partial_ratio(ocr_text, prod_name)
+                ) / 100.0 if ocr_text else 0
+                
+                final_score = (0.4 * tag_score) + (0.3 * brand_match) + (0.3 * ocr_score)
+                product["match_score"] = round(final_score, 3)
+                scored_results.append(product)
+
+            scored_results.sort(key=lambda x: x["match_score"], reverse=True)
+            top_matches = scored_results[:5]
+            total_results = len(scored_results)
+        except Exception as e:
+            logging.error(f"Search query failed: {str(e)}")
+
+    # 4. Save to SearchHistory
+    if search_history_container:
+        top_match_preview = None
+        if top_matches:
+            top_match_preview = {
+                "productId": top_matches[0].get("productId"),
+                "name": top_matches[0].get("name"),
+                "imageUrl": top_matches[0].get("imageUrl"),
+                "match_score": top_matches[0].get("match_score")
+            }
+
+        search_record = {
+            "id": search_id,
+            "userId": user_id,
+            "category": search_category,
+            "timestamp": datetime.utcnow().isoformat(),
+            "searchImageUrl": search_image_url,
+            "topMatch": top_match_preview,
+            "resultCount": total_results
+        }
+        try:
+            search_history_container.upsert_item(search_record)
+        except Exception as e:
+            logging.error(f"Failed to save search history: {str(e)}")
 
     if not search_tags and not search_brands:
-        return {"message": "Could not identify image features", "results": []}
-
-    # 2. Candidate Retrieval
-    query = (
-        "SELECT * FROM c WHERE "
-        "EXISTS(SELECT VALUE t FROM t IN c.tags WHERE ARRAY_CONTAINS(@tags, t.name)) OR "
-        "EXISTS(SELECT VALUE b FROM b IN c.brands WHERE ARRAY_CONTAINS(@brands, b))"
-    )
-    
-    try:
-        results = list(container.query_items(
-            query=query,
-            parameters=[
-                {"name": "@tags", "value": search_tags},
-                {"name": "@brands", "value": [b.capitalize() for b in search_brands]}
-            ],
-            enable_cross_partition_query=True
-        ))
-        logging.info(f"SEARCH DEBUG - Candidates found in DB: {len(results)}")
-    except Exception as e:
-        logging.error(f"SEARCH DEBUG - Query failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Database query failed: {str(e)}")
-
-    # 3. Apply Multi-Factor Scoring
-    scored_results = []
-    for product in results:
-        prod_tags = [t["name"] for t in product.get("tags", [])]
-        common_tags = set(search_tags) & set(prod_tags)
-        tag_score = len(common_tags) / len(set(search_tags) | set(prod_tags)) if (set(search_tags) | set(prod_tags)) else 0
-        
-        prod_brands = [b.lower() for b in product.get("brands", [])]
-        brand_match = 1.0 if (set(search_brands) & set(prod_brands)) else 0.0
-        
-        prod_ocr = product.get("ocr_text", "").lower()
-        prod_name = product.get("name", "").lower()
-        ocr_score = max(
-            fuzz.partial_ratio(ocr_text, prod_ocr),
-            fuzz.partial_ratio(ocr_text, prod_name)
-        ) / 100.0 if ocr_text else 0
-        
-        final_score = (0.4 * tag_score) + (0.3 * brand_match) + (0.3 * ocr_score)
-        
-        product["match_score"] = round(final_score, 3)
-        scored_results.append(product)
-
-    scored_results.sort(key=lambda x: x["match_score"], reverse=True)
+        return {"message": "Could not identify image features", "results": [], "searchId": search_id}
 
     return {
-        "message": f"Found {len(scored_results)} matching products",
-        "results": scored_results[:5]
+        "message": f"Found {total_results} matching products",
+        "results": top_matches,
+        "searchId": search_id
     }
+
+
+@app.get("/search/history")
+async def get_search_history(user_id: str, limit: int = 50, offset: int = 0):
+    """
+    Returns detailed search history grouped by day and category with pagination.
+    """
+    if not search_history_container:
+        raise HTTPException(status_code=500, detail="Search history container not initialized")
+    
+    query = f"SELECT * FROM c WHERE c.userId = @userId ORDER BY c.timestamp DESC OFFSET {offset} LIMIT {limit}"
+    try:
+        results = list(search_history_container.query_items(
+            query=query,
+            parameters=[{"name": "@userId", "value": user_id}],
+            enable_cross_partition_query=False
+        ))
+        
+        history = defaultdict(lambda: defaultdict(list))
+        for item in results:
+            day = item["timestamp"].split("T")[0]
+            category = item["category"]
+            
+            clean_item = {
+                "searchId": item.get("id"),
+                "timestamp": item.get("timestamp"),
+                "searchImageUrl": item.get("searchImageUrl"),
+                "topMatch": item.get("topMatch"),
+                "resultCount": item.get("resultCount")
+            }
+            history[day][category].append(clean_item)
+            
+        return {
+            "user_id": user_id,
+            "history": history,
+            "count": len(results),
+            "limit": limit,
+            "offset": offset
+        }
+    except Exception as e:
+        logging.error(f"Failed to query search history: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve search history")
+
+
+@app.delete("/search/history/{search_id}")
+async def delete_search_history_item(user_id: str, search_id: str):
+    """
+    Deletes a specific search history item.
+    """
+    if not search_history_container:
+        raise HTTPException(status_code=500, detail="Search history container not initialized")
+    
+    try:
+        search_history_container.delete_item(item=search_id, partition_key=user_id)
+        return {"message": "Search history item deleted successfully"}
+    except Exception as e:
+        logging.error(f"Failed to delete history item: {str(e)}")
+        raise HTTPException(status_code=404, detail="Item not found or could not be deleted")
