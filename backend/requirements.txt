@@ -3,6 +3,8 @@ uvicorn
 python-multipart
 requests
 python-dotenv
+thefuzz
+python-Levenshtein
 
 # Azure Storage
 azure-storage-blob

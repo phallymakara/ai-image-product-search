@@ -2,3 +2,5 @@ azure-functions
 requests
 azure-cosmos
 python-dotenv
+thefuzz
+python-Levenshtein
