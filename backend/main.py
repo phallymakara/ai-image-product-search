@@ -241,10 +241,10 @@ async def upload_image(
 
 
 @app.post("/search")
-async def search_similar_product(user_id: str, file: UploadFile = File(...)):
+async def search_similar_product(user_id: str, file: UploadFile = File(...), category: Optional[str] = None):
     """
     Search with Score = 0.4*tags + 0.3*ocr + 0.3*brands.
-    Logs search history even if no results are found.
+    Supports optional category filtering.
     """
     if not container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
@@ -252,7 +252,7 @@ async def search_similar_product(user_id: str, file: UploadFile = File(...)):
     file_bytes = await file.read()
     search_id = f"S{str(uuid.uuid4())[:7]}"
 
-    # 1. Upload search image for history preview (optional)
+    # 1. Upload search image for history preview
     search_image_url = None
     if blob_service_client:
         try:
@@ -271,33 +271,37 @@ async def search_similar_product(user_id: str, file: UploadFile = File(...)):
     search_tags = [t["name"] for t in search_tags_data]
     search_brands = [b.lower() for b in extract_brands(analysis_result)]
 
-    # Identify search category
-    search_category = "uncategorized"
+    # Identify search category for logging
+    detected_category = "uncategorized"
     categories = analysis_result.get("categories", [])
     if categories:
         raw_cat = categories[0].get("name", "")
-        search_category = raw_cat.split("_")[0] if "_" in raw_cat else raw_cat
+        detected_category = raw_cat.split("_")[0] if "_" in raw_cat else raw_cat
     elif search_tags:
-        search_category = search_tags[0]
+        detected_category = search_tags[0]
 
     # 3. Candidate Retrieval & Scoring
     top_matches = []
     total_results = 0
     
     if search_tags or search_brands:
-        query = (
-            "SELECT * FROM c WHERE "
-            "EXISTS(SELECT VALUE t FROM t IN c.tags WHERE ARRAY_CONTAINS(@tags, t.name)) OR "
-            "EXISTS(SELECT VALUE b FROM b IN c.brands WHERE ARRAY_CONTAINS(@brands, b))"
-        )
+        # Construct query with optional category filter
+        query_parts = ["SELECT * FROM c WHERE (EXISTS(SELECT VALUE t FROM t IN c.tags WHERE ARRAY_CONTAINS(@tags, t.name)) OR EXISTS(SELECT VALUE b FROM b IN c.brands WHERE ARRAY_CONTAINS(@brands, b)))"]
+        parameters = [
+            {"name": "@tags", "value": search_tags},
+            {"name": "@brands", "value": [b.capitalize() for b in search_brands]}
+        ]
+
+        if category:
+            query_parts.append("AND c.category = @filter_category")
+            parameters.append({"name": "@filter_category", "value": category})
+
+        query = " ".join(query_parts)
         
         try:
             db_results = list(container.query_items(
                 query=query,
-                parameters=[
-                    {"name": "@tags", "value": search_tags},
-                    {"name": "@brands", "value": [b.capitalize() for b in search_brands]}
-                ],
+                parameters=parameters,
                 enable_cross_partition_query=True
             ))
             
@@ -341,7 +345,8 @@ async def search_similar_product(user_id: str, file: UploadFile = File(...)):
         search_record = {
             "id": search_id,
             "userId": user_id,
-            "category": search_category,
+            "category": detected_category,
+            "filterCategory": category, # Log if user used a filter
             "timestamp": datetime.utcnow().isoformat(),
             "searchImageUrl": search_image_url,
             "topMatch": top_match_preview,
@@ -352,14 +357,61 @@ async def search_similar_product(user_id: str, file: UploadFile = File(...)):
         except Exception as e:
             logging.error(f"Failed to save search history: {str(e)}")
 
-    if not search_tags and not search_brands:
-        return {"message": "Could not identify image features", "results": [], "searchId": search_id}
-
     return {
         "message": f"Found {total_results} matching products",
         "results": top_matches,
-        "searchId": search_id
+        "searchId": search_id,
+        "filter_applied": category
     }
+
+
+@app.get("/products")
+async def list_products(category: Optional[str] = None, limit: int = 50, offset: int = 0):
+    """
+    Returns products based on a category name input. 
+    Matches are case-insensitive for better user experience.
+    """
+    if not container:
+        raise HTTPException(status_code=500, detail="Database connection not initialized")
+    
+    # Base query
+    query_str = "SELECT * FROM c"
+    params = []
+    
+    # If the user input a category name, filter by it (case-insensitive)
+    if category:
+        # Using STRINGEQUALS for case-insensitive matching in Cosmos DB
+        query_str += " WHERE STRINGEQUALS(c.category, @category, true)"
+        params.append({"name": "@category", "value": category})
+    
+    # Add pagination
+    query_str += f" OFFSET {offset} LIMIT {limit}"
+    
+    try:
+        results = list(container.query_items(
+            query=query_str,
+            parameters=params,
+            enable_cross_partition_query=True
+        ))
+        
+        # Clean up internal Cosmos DB fields
+        for item in results:
+            item.pop("_rid", None)
+            item.pop("_self", None)
+            item.pop("_etag", None)
+            item.pop("_attachments", None)
+            item.pop("_ts", None)
+
+        return {
+            "category_queried": category,
+            "products": results,
+            "count": len(results),
+            "limit": limit,
+            "offset": offset
+        }
+    except Exception as e:
+        logging.error(f"Failed to filter products by category: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve products for this category")
 
 
 @app.get("/search/history")
