@@ -7,15 +7,15 @@ from azure.cosmos import CosmosClient, PartitionKey
 from dotenv import load_dotenv
 
 # Load environment variables (Local only, Azure uses App Settings)
-load_dotenv()
+load_dotenv() 
 
 # Configuration
 VISION_ENDPOINT = os.getenv("VISION_ENDPOINT")
 VISION_KEY = os.getenv("VISION_KEY")
 COSMOS_ENDPOINT = os.getenv("COSMOS_ENDPOINT")
 COSMOS_KEY = os.getenv("COSMOS_KEY")
-COSMOS_DATABASE_NAME = os.getenv("COSMOS_DATABASE_NAME", "ProductDB")
-COSMOS_CONTAINER_NAME = os.getenv("COSMOS_CONTAINER_NAME", "Products")
+COSMOS_DATABASE_NAME = os.getenv("COSMOS_DATABASE_NAME", os.getenv("COSMOS_DATABASE", "ProductDB"))
+COSMOS_CONTAINER_NAME = os.getenv("COSMOS_CONTAINER_NAME", os.getenv("COSMOS_CONTAINER", "Products"))
 # URL of the storage account (e.g., https://mystorage.blob.core.windows.net)
 STORAGE_ACCOUNT_URL = os.getenv("STORAGE_ACCOUNT_URL", "").rstrip("/")
 
