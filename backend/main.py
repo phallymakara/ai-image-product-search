@@ -365,6 +365,112 @@ async def search_similar_product(user_id: str, file: UploadFile = File(...), cat
     }
 
 
+@app.get("/search/text")
+async def search_products_by_text(user_id: str, query: str, category: Optional[str] = None, limit: int = 5):
+    """
+    Find similar products using text-based matching.
+    Matches against name, tags, brands, and OCR text.
+    Returns results in the same format as image search.
+    """
+    if not container:
+        raise HTTPException(status_code=500, detail="Database connection not initialized")
+
+    search_id = f"T{str(uuid.uuid4())[:7]}"
+    query_lower = query.lower()
+
+    # 1. Candidate Retrieval from Cosmos DB
+    # We use a broad query to get potential candidates then rank them in memory
+    query_parts = ["SELECT * FROM c WHERE (CONTAINS(LOWER(c.name), @query) OR CONTAINS(LOWER(c.ocr_text), @query) OR EXISTS(SELECT VALUE t FROM t IN c.tags WHERE CONTAINS(LOWER(t.name), @query)) OR EXISTS(SELECT VALUE b FROM b IN c.brands WHERE CONTAINS(LOWER(b), @query)))"]
+    parameters = [{"name": "@query", "value": query_lower}]
+
+    if category:
+        query_parts.append("AND STRINGEQUALS(c.category, @category, true)")
+        parameters.append({"name": "@category", "value": category})
+
+    db_query = " ".join(query_parts)
+    
+    top_matches = []
+    total_results = 0
+
+    try:
+        db_results = list(container.query_items(
+            query=db_query,
+            parameters=parameters,
+            enable_cross_partition_query=True
+        ))
+
+        scored_results = []
+        for product in db_results:
+            # Calculate similarity scores
+            name_score = fuzz.token_set_ratio(query_lower, product.get("name", "").lower()) / 100.0
+            
+            # Tag score: max similarity with any tag
+            prod_tags = [t["name"].lower() for t in product.get("tags", [])]
+            tag_score = max([fuzz.token_set_ratio(query_lower, t) for t in prod_tags]) / 100.0 if prod_tags else 0
+            
+            # Brand score: max similarity with any brand
+            prod_brands = [b.lower() for b in product.get("brands", [])]
+            brand_score = max([fuzz.token_set_ratio(query_lower, b) for b in prod_brands]) / 100.0 if prod_brands else 0
+            
+            # OCR score
+            ocr_text_val = product.get("ocr_text", "").lower()
+            ocr_score = fuzz.partial_ratio(query_lower, ocr_text_val) / 100.0 if ocr_text_val else 0
+            
+            # Weighted Final Score
+            # (0.5 * name_score) + (0.2 * tag_score) + (0.1 * brand_score) + (0.2 * ocr_score)
+            final_score = (0.5 * name_score) + (0.2 * tag_score) + (0.1 * brand_score) + (0.2 * ocr_score)
+            
+            product["match_score"] = round(final_score, 3)
+            scored_results.append(product)
+
+        # Sort and limit
+        scored_results.sort(key=lambda x: x["match_score"], reverse=True)
+        top_matches = scored_results[:limit]
+        total_results = len(scored_results)
+
+    except Exception as e:
+        logging.error(f"Text search query failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Search failed")
+
+    # 2. Save to SearchHistory
+    if search_history_container:
+        detected_category = top_matches[0].get("category", "uncategorized") if top_matches else "uncategorized"
+        
+        top_match_preview = None
+        if top_matches:
+            top_match_preview = {
+                "productId": top_matches[0].get("productId"),
+                "name": top_matches[0].get("name"),
+                "imageUrl": top_matches[0].get("imageUrl"),
+                "match_score": top_matches[0].get("match_score")
+            }
+
+        search_record = {
+            "id": search_id,
+            "userId": user_id,
+            "queryText": query,
+            "category": detected_category,
+            "filterCategory": category,
+            "timestamp": datetime.utcnow().isoformat(),
+            "searchImageUrl": None,
+            "topMatch": top_match_preview,
+            "resultCount": total_results,
+            "searchType": "text"
+        }
+        try:
+            search_history_container.upsert_item(search_record)
+        except Exception as e:
+            logging.error(f"Failed to save text search history: {str(e)}")
+
+    return {
+        "message": f"Found {total_results} matching products",
+        "results": top_matches,
+        "searchId": search_id,
+        "filter_applied": category,
+        "search_type": "text"
+    }
+
+
 @app.get("/products")
 async def list_products(category: Optional[str] = None, limit: int = 50, offset: int = 0):
     """
@@ -414,19 +520,142 @@ async def list_products(category: Optional[str] = None, limit: int = 50, offset:
         raise HTTPException(status_code=500, detail="Failed to retrieve products for this category")
 
 
-@app.get("/search/history")
-async def get_search_history(user_id: str, limit: int = 50, offset: int = 0):
+@app.get("/categories")
+async def list_unique_categories():
     """
-    Returns detailed search history grouped by day and category with pagination.
+    Returns a list of all unique categories available in the database.
+    This is useful for populating filter dropdowns in the frontend.
+    """
+    if not container:
+        raise HTTPException(status_code=500, detail="Database connection not initialized")
+    
+    # Cosmos DB query to get distinct categories
+    query_str = "SELECT DISTINCT VALUE c.category FROM c WHERE IS_DEFINED(c.category)"
+    
+    try:
+        results = list(container.query_items(
+            query=query_str,
+            enable_cross_partition_query=True
+        ))
+        
+        # Sort categories for better UX
+        categories = sorted([cat for cat in results if cat])
+        
+        return {
+            "categories": categories,
+            "count": len(categories)
+        }
+    except Exception as e:
+        logging.error(f"Failed to fetch unique categories: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve categories")
+
+
+@app.get("/products/trending")
+async def get_trending_products():
+    """
+    Returns the most searched products recently by aggregating the search history.
+    Fixed to last 30 days and top 5 products.
+    """
+    if not search_history_container or not container:
+        raise HTTPException(status_code=500, detail="Database connection not initialized")
+    
+    # System defaults
+    DAYS = 30
+    LIMIT = 5
+    
+    # 1. Calculate the start timestamp for the lookback period
+    from datetime import timedelta
+    start_date = (datetime.utcnow() - timedelta(days=DAYS)).isoformat()
+    
+    # 2. Query SearchHistory for recent top matches
+    query = "SELECT c.topMatch.productId FROM c WHERE c.timestamp >= @start_date AND IS_DEFINED(c.topMatch.productId)"
+    parameters = [{"name": "@start_date", "value": start_date}]
+    
+    try:
+        results = list(search_history_container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True
+        ))
+        
+        # 3. Aggregate product IDs
+        id_counts = defaultdict(int)
+        for item in results:
+            pid = item.get("productId")
+            if pid:
+                id_counts[pid] += 1
+        
+        # 4. Sort by frequency and take the top N
+        sorted_pids = sorted(id_counts.items(), key=lambda x: x[1], reverse=True)[:LIMIT]
+        top_pids = [pid for pid, count in sorted_pids]
+        
+        if not top_pids:
+            return {"trending_products": [], "count": 0}
+        
+        # 5. Fetch full product metadata for the top IDs
+        pid_placeholders = [f"@pid{i}" for i in range(len(top_pids))]
+        pid_params = [{"name": f"@pid{i}", "value": pid} for i, pid in enumerate(top_pids)]
+        
+        query_str = f"SELECT * FROM c WHERE c.productId IN ({', '.join(pid_placeholders)})"
+        
+        db_products = list(container.query_items(
+            query=query_str,
+            parameters=pid_params,
+            enable_cross_partition_query=True
+        ))
+        
+        # Add the search count to the product data for the UI
+        trending_products = []
+        for prod in db_products:
+            prod_id = prod.get("productId")
+            prod["search_count"] = id_counts.get(prod_id, 0)
+            
+            # Clean up internal Cosmos fields
+            prod.pop("_rid", None)
+            prod.pop("_self", None)
+            prod.pop("_etag", None)
+            prod.pop("_attachments", None)
+            prod.pop("_ts", None)
+            
+            trending_products.append(prod)
+            
+        # Re-sort because the IN query doesn't guarantee order
+        trending_products.sort(key=lambda x: x["search_count"], reverse=True)
+        
+        return {
+            "trending_products": trending_products,
+            "count": len(trending_products)
+        }
+    except Exception as e:
+        logging.error(f"Failed to fetch trending products: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve trending products")
+
+
+@app.get("/search/history")
+async def get_search_history(user_id: str, category: Optional[str] = None, limit: int = 50, offset: int = 0):
+    """
+    Returns detailed search history grouped by day and category with optional category filtering.
     """
     if not search_history_container:
         raise HTTPException(status_code=500, detail="Search history container not initialized")
     
-    query = f"SELECT * FROM c WHERE c.userId = @userId ORDER BY c.timestamp DESC OFFSET {offset} LIMIT {limit}"
+    # Base query
+    query_str = "SELECT * FROM c WHERE c.userId = @userId"
+    params = [{"name": "@userId", "value": user_id}]
+    
+    # Optional category filtering
+    if category:
+        query_str += " AND STRINGEQUALS(c.category, @category, true)"
+        params.append({"name": "@category", "value": category})
+    
+    # Sorting and pagination
+    query_str += " ORDER BY c.timestamp DESC"
+    query_str += f" OFFSET {offset} LIMIT {limit}"
+    
     try:
         results = list(search_history_container.query_items(
-            query=query,
-            parameters=[{"name": "@userId", "value": user_id}],
+            query=query_str,
+            parameters=params,
             enable_cross_partition_query=False
         ))
         
