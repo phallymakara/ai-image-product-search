@@ -1,0 +1,109 @@
+import logging
+from datetime import datetime, timedelta
+from collections import defaultdict
+from typing import Optional
+from fastapi import APIRouter, HTTPException
+
+from database.cosmos import get_product_container, get_history_container
+
+router = APIRouter()
+
+
+@router.get("/products")
+async def list_products(category: Optional[str] = None, limit: int = 50, offset: int = 0):
+    """Returns products with optional category filtering and pagination."""
+    container = get_product_container()
+    if not container:
+        raise HTTPException(status_code=500, detail="Database connection not initialized")
+
+    query_str = "SELECT * FROM c"
+    params = []
+
+    if category:
+        query_str += " WHERE STRINGEQUALS(c.category, @category, true)"
+        params.append({"name": "@category", "value": category})
+
+    query_str += f" OFFSET {offset} LIMIT {limit}"
+
+    try:
+        results = list(container.query_items(
+            query=query_str, parameters=params, enable_cross_partition_query=True
+        ))
+        for item in results:
+            for key in ["_rid", "_self", "_etag", "_attachments", "_ts"]:
+                item.pop(key, None)
+
+        return {"category_queried": category, "products": results, "count": len(results), "limit": limit, "offset": offset}
+    except Exception as e:
+        logging.error(f"Failed to list products: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve products")
+
+
+@router.get("/categories")
+async def list_categories():
+    """Returns all unique product categories."""
+    container = get_product_container()
+    if not container:
+        raise HTTPException(status_code=500, detail="Database connection not initialized")
+
+    try:
+        results = list(container.query_items(
+            query="SELECT DISTINCT VALUE c.category FROM c WHERE IS_DEFINED(c.category)",
+            enable_cross_partition_query=True
+        ))
+        categories = sorted([cat for cat in results if cat])
+        return {"categories": categories, "count": len(categories)}
+    except Exception as e:
+        logging.error(f"Failed to fetch categories: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve categories")
+
+
+@router.get("/products/trending")
+async def get_trending_products():
+    """Returns most searched products in the last 30 days."""
+    container = get_product_container()
+    history_container = get_history_container()
+
+    if not container or not history_container:
+        raise HTTPException(status_code=500, detail="Database connection not initialized")
+
+    DAYS, LIMIT = 30, 5
+    start_date = (datetime.utcnow() - timedelta(days=DAYS)).isoformat()
+
+    try:
+        results = list(history_container.query_items(
+            query="SELECT c.topMatch.productId FROM c WHERE c.timestamp >= @start_date AND IS_DEFINED(c.topMatch.productId)",
+            parameters=[{"name": "@start_date", "value": start_date}],
+            enable_cross_partition_query=True
+        ))
+
+        id_counts = defaultdict(int)
+        for item in results:
+            pid = item.get("productId")
+            if pid:
+                id_counts[pid] += 1
+
+        top_pids = [pid for pid, _ in sorted(id_counts.items(), key=lambda x: x[1], reverse=True)[:LIMIT]]
+
+        if not top_pids:
+            return {"trending_products": [], "count": 0}
+
+        pid_placeholders = [f"@pid{i}" for i in range(len(top_pids))]
+        pid_params = [{"name": f"@pid{i}", "value": pid} for i, pid in enumerate(top_pids)]
+
+        db_products = list(container.query_items(
+            query=f"SELECT * FROM c WHERE c.productId IN ({', '.join(pid_placeholders)})",
+            parameters=pid_params,
+            enable_cross_partition_query=True
+        ))
+
+        for prod in db_products:
+            prod["search_count"] = id_counts.get(prod.get("productId"), 0)
+            for key in ["_rid", "_self", "_etag", "_attachments", "_ts"]:
+                prod.pop(key, None)
+
+        db_products.sort(key=lambda x: x["search_count"], reverse=True)
+        return {"trending_products": db_products, "count": len(db_products)}
+    except Exception as e:
+        logging.error(f"Failed to fetch trending products: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve trending products")
