@@ -8,7 +8,6 @@
 
 **AI Visual Product Search** lets users upload or capture a product image and automatically find the most similar products from a catalog. The system uses **Azure AI Vision** to extract tags, detect objects, and perform OCR — then ranks results using a weighted similarity score.
 
----
 
 ## Business Use Cases
 
@@ -17,7 +16,6 @@
 - 📦 Distributor product verification
 - 🧑‍💼 Field sales product identification
 
----
 
 ## Tech Stack
 
@@ -30,7 +28,6 @@
 | Automation | Azure Functions / Power Automate   |
 | Database   | Azure SQL / SharePoint / Dataverse |
 
----
 
 ## Core Features
 
@@ -56,7 +53,6 @@ Show the **top 3** similar products with confidence scores.
 
 Store images and results for future reference and audit trails.
 
----
 
 ## Matching Logic
 
@@ -64,7 +60,6 @@ Store images and results for future reference and audit trails.
 Score = (0.4 × tag similarity) + (0.3 × OCR similarity) + (0.3 × brand match)
 ```
 
----
 
 ## Project Structure
 
@@ -79,7 +74,6 @@ ai-visual-product-search/
 └── README.md
 ```
 
----
 
 ## Getting Started
 
@@ -120,7 +114,6 @@ VISION_KEY=your_key
 2. Upload an image via the API or Power App
 3. View results at `/result/{imageId}`
 
----
 
 ## Author
 
