@@ -1,42 +1,42 @@
 # AI Visual Product Search
 
-## Overview
-
-AI Visual Product Search is an application that allows users to upload or capture product images and automatically find similar products using AI.
-
-The system leverages **Azure AI Vision** to analyze images (tags, objects, OCR) and matches them against a product catalog to return the top results.
+> Instantly identify and match products using AI-powered image analysis.
 
 ---
 
-## Objective
+## Overview
 
-- Analyze uploaded product images
-- Extract features (tags, objects, text)
-- Match against product database
-- Return top 3 similar products
+**AI Visual Product Search** lets users upload or capture a product image and automatically find the most similar products from a catalog. The system uses **Azure AI Vision** to extract tags, detect objects, and perform OCR — then ranks results using a weighted similarity score.
+
+---
 
 ## Business Use Cases
 
-- Retail product lookup
-- Warehouse inventory checking
-- Distributor product verification
-- Field sales product identification
+- 🛒 Retail product lookup
+- 🏭 Warehouse inventory checking
+- 📦 Distributor product verification
+- 🧑‍💼 Field sales product identification
+
+---
 
 ## Tech Stack
 
-- Frontend: Power Apps (Canvas App)
-- Backend: FastAPI / Node.js
-- AI Service: Azure AI Vision
-- Storage: Azure Blob Storage
-- Automation: Azure Function / Power Automate
-- Database: Azure SQL / SharePoint / Dataverse
+| Layer      | Technology                         |
+| ---------- | ---------------------------------- |
+| Frontend   | Power Apps (Canvas App)            |
+| Backend    | FastAPI / Node.js                  |
+| AI Service | Azure AI Vision                    |
+| Storage    | Azure Blob Storage                 |
+| Automation | Azure Functions / Power Automate   |
+| Database   | Azure SQL / SharePoint / Dataverse |
+
+---
 
 ## Core Features
 
 ### 1. Image Upload
 
-- Upload or capture product image
-- Store in Azure Blob Storage
+Upload or capture a product image and store it in Azure Blob Storage.
 
 ### 2. Image Analysis
 
@@ -46,24 +46,32 @@ The system leverages **Azure AI Vision** to analyze images (tags, objects, OCR) 
 
 ### 3. Product Matching
 
-- Compare tags + OCR with product catalog
-- Rank results using similarity scoring
+Compare extracted tags and OCR text against the product catalog, then rank results using similarity scoring.
 
 ### 4. Result Display
 
-- Show Top 3 similar products
-- Display confidence score
+Show the **top 3** similar products with confidence scores.
 
 ### 5. Search History
 
-- Store image + results for future reference
+Store images and results for future reference and audit trails.
+
+---
+
+## Matching Logic
+
+```
+Score = (0.4 × tag similarity) + (0.3 × OCR similarity) + (0.3 × brand match)
+```
+
+---
 
 ## Project Structure
 
-```text
+```
 ai-visual-product-search/
 │
-├── backend/              # API (FastAPI / Node)
+├── backend/              # API (FastAPI / Node.js)
 ├── azure-functions/      # Blob trigger processing
 ├── frontend/             # Power App / UI
 ├── database/             # Product dataset
@@ -71,16 +79,18 @@ ai-visual-product-search/
 └── README.md
 ```
 
+---
+
 ## Getting Started
 
-### 1. Clone Repository
+### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/phallymakara/ai-visual-product-search.git
 cd ai-visual-product-search
 ```
 
-### 2. Setup Backend
+### 2. Set Up the Backend
 
 ```bash
 cd backend
@@ -90,11 +100,13 @@ uvicorn main:app --reload
 
 ### 3. Configure Azure
 
-- Create Azure Blob Storage
-- Create Azure AI Vision resource
-- (Optional) Create Azure Function for trigger
+Create the following Azure resources:
 
-Update environment variables:
+- Azure Blob Storage
+- Azure AI Vision resource
+- Azure Function _(optional, for blob trigger)_
+
+Then set your environment variables:
 
 ```env
 AZURE_STORAGE_CONNECTION=your_connection_string
@@ -102,28 +114,24 @@ VISION_ENDPOINT=your_endpoint
 VISION_KEY=your_key
 ```
 
-### 4. Run Application
+### 4. Run the Application
 
-- Start backend server
-- Upload image via API or Power App
-- View results from `/result/{imageId}`
-
-## Matching Logic (Simplified)
-
-```text
-Score = 0.4 × tag similarity + 0.3 × OCR similarity + 0.3 × brand match
-```
+1. Start the backend server
+2. Upload an image via the API or Power App
+3. View results at `/result/{imageId}`
 
 ---
 
 ## Author
 
-- PHALLY MAKARA
+**PHALLY MAKARA**
 
-## All rights reserved.
+---
 
-Copyright (c) 2026 PHALLY MAKARA
+## License
 
-- This project and all associated files are the intellectual property of PHALLY MAKARA and Team Member.
-- Unauthorized use, reproduction, or distribution of this project is **strictly prohibited** and may result in legal action.
-- For permission requests, please contact the author directly. Contact: phallymakara01@example.com
+Copyright © 2026 PHALLY MAKARA. All rights reserved.
+
+This project and all associated files are the intellectual property of PHALLY MAKARA and team members. Unauthorized use, reproduction, or distribution is **strictly prohibited** and may result in legal action.
+
+For permission requests, contact: phallymakara01@example.com
