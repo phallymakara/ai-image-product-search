@@ -1,8 +1,8 @@
 import uuid
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import defaultdict
-from typing import Optional
+from typing import Optional, List
 from fastapi import APIRouter, UploadFile, File, HTTPException
 
 from database.cosmos import get_product_container, get_history_container
@@ -10,7 +10,7 @@ from services.storage import upload_search_image
 from services.vision import analyze_image, ocr_image, extract_tags, extract_brands, detect_category
 from services.matching import score_product_by_image, score_product_by_text
 
-router = APIRouter()
+router = APIRouter(tags=["Search"])
 
 
 @router.post("/search")
@@ -19,18 +19,29 @@ async def search_similar_product(
     file: UploadFile = File(...),
     category: Optional[str] = None
 ):
-    """Image-based product search. Score = 0.4*tags + 0.3*brands + 0.3*ocr."""
+    """
+    Image-based product search. 
+    Score = 0.4*tags + 0.3*brands + 0.3*ocr.
+    Supports OCR-only search if no tags/brands are found.
+    """
     container = get_product_container()
     history_container = get_history_container()
 
     if not container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
 
-    file_bytes = await file.read()
+    try:
+        file_bytes = await file.read()
+    except Exception as e:
+        logging.error(f"Failed to read search file: {str(e)}")
+        raise HTTPException(status_code=400, detail="Failed to read search file")
+
     search_id = f"S{str(uuid.uuid4())[:7]}"
 
+    # 1. Upload for history
     search_image_url = upload_search_image(file_bytes, search_id, user_id)
 
+    # 2. Analyze
     analysis_result = analyze_image(file_bytes)
     ocr_text = ocr_image(file_bytes).lower()
     search_tags_data = extract_tags(analysis_result)
@@ -41,34 +52,57 @@ async def search_similar_product(
     top_matches = []
     total_results = 0
 
-    if search_tags or search_brands:
-        query_parts = [
-            "SELECT * FROM c WHERE (EXISTS(SELECT VALUE t FROM t IN c.tags WHERE ARRAY_CONTAINS(@tags, t.name)) "
-            "OR EXISTS(SELECT VALUE b FROM b IN c.brands WHERE ARRAY_CONTAINS(@brands, b)))"
-        ]
-        parameters = [
-            {"name": "@tags", "value": search_tags},
-            {"name": "@brands", "value": [b.capitalize() for b in search_brands]}
-        ]
+    # 3. Dynamic Query Construction
+    # We query if there's ANY evidence (tags, brands, or OCR text)
+    if search_tags or search_brands or ocr_text:
+        query_parts = ["SELECT * FROM c WHERE ("]
+        conditions = []
+        parameters = []
+
+        if search_tags:
+            conditions.append("EXISTS(SELECT VALUE t FROM t IN c.tags WHERE ARRAY_CONTAINS(@tags, t.name))")
+            parameters.append({"name": "@tags", "value": search_tags})
+
+        if search_brands:
+            conditions.append("EXISTS(SELECT VALUE b FROM b IN c.brands WHERE ARRAY_CONTAINS(@brands, b))")
+            parameters.append({"name": "@brands", "value": [b.capitalize() for b in search_brands]})
+
+        if ocr_text:
+            # Broad search on name or ocr_text for candidates
+            # Using CONTAINS for initial filtering to keep candidates manageable
+            conditions.append("CONTAINS(LOWER(c.ocr_text), @ocr) OR CONTAINS(LOWER(c.name), @ocr)")
+            parameters.append({"name": "@ocr", "value": ocr_text[:30]}) # Use first 30 chars for broad filter
+
+        query_parts.append(" OR ".join(conditions))
+        query_parts.append(")")
+
         if category:
-            query_parts.append("AND c.category = @filter_category")
+            query_parts.append("AND STRINGEQUALS(c.category, @filter_category, true)")
             parameters.append({"name": "@filter_category", "value": category})
+
+        query = " ".join(query_parts)
 
         try:
             db_results = list(container.query_items(
-                query=" ".join(query_parts),
+                query=query,
                 parameters=parameters,
                 enable_cross_partition_query=True
             ))
+            
+            # Score each product
             for product in db_results:
                 product["match_score"] = score_product_by_image(product, search_tags, search_brands, ocr_text)
 
+            # Filter out very low scores (optional, but keeps results relevant)
+            db_results = [p for p in db_results if p.get("match_score", 0) > 0.1]
+            
             db_results.sort(key=lambda x: x["match_score"], reverse=True)
             top_matches = db_results[:5]
             total_results = len(db_results)
         except Exception as e:
-            logging.error(f"Search query failed: {str(e)}")
+            logging.error(f"Search query failed for {search_id}: {str(e)}")
 
+    # 4. History Logging
     if history_container:
         top_match_preview = None
         if top_matches:
@@ -87,16 +121,18 @@ async def search_similar_product(
                 "timestamp": datetime.utcnow().isoformat(),
                 "searchImageUrl": search_image_url,
                 "topMatch": top_match_preview,
-                "resultCount": total_results
+                "resultCount": total_results,
+                "searchType": "image"
             })
         except Exception as e:
-            logging.error(f"Failed to save search history: {str(e)}")
+            logging.error(f"Failed to save search history for {search_id}: {str(e)}")
 
     return {
         "message": f"Found {total_results} matching products",
         "results": top_matches,
         "searchId": search_id,
-        "filter_applied": category
+        "filter_applied": category,
+        "search_type": "image"
     }
 
 
@@ -107,7 +143,10 @@ async def search_by_text(
     category: Optional[str] = None,
     limit: int = 5
 ):
-    """Text-based product search. Score = 0.5*name + 0.2*tags + 0.1*brands + 0.2*ocr."""
+    """
+    Text-based product search. 
+    Score = 0.5*name + 0.2*tags + 0.1*brands + 0.2*ocr.
+    """
     container = get_product_container()
     history_container = get_history_container()
 
@@ -115,8 +154,12 @@ async def search_by_text(
         raise HTTPException(status_code=500, detail="Database connection not initialized")
 
     search_id = f"T{str(uuid.uuid4())[:7]}"
-    query_lower = query.lower()
+    query_lower = query.strip().lower()
 
+    if not query_lower:
+        raise HTTPException(status_code=400, detail="Search query cannot be empty")
+
+    # Construct efficient query
     query_parts = [
         "SELECT * FROM c WHERE (CONTAINS(LOWER(c.name), @query) OR CONTAINS(LOWER(c.ocr_text), @query) "
         "OR EXISTS(SELECT VALUE t FROM t IN c.tags WHERE CONTAINS(LOWER(t.name), @query)) "
@@ -137,16 +180,18 @@ async def search_by_text(
             parameters=parameters,
             enable_cross_partition_query=True
         ))
+        
         for product in db_results:
-            product["match_score"] = score_product_by_text(product, query)
+            product["match_score"] = score_product_by_text(product, query_lower)
 
         db_results.sort(key=lambda x: x["match_score"], reverse=True)
         top_matches = db_results[:limit]
         total_results = len(db_results)
     except Exception as e:
-        logging.error(f"Text search failed: {str(e)}")
+        logging.error(f"Text search failed for {search_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Search failed")
 
+    # History Logging
     if history_container:
         top_match_preview = None
         if top_matches:
@@ -170,7 +215,7 @@ async def search_by_text(
                 "searchType": "text"
             })
         except Exception as e:
-            logging.error(f"Failed to save text search history: {str(e)}")
+            logging.error(f"Failed to save text search history for {search_id}: {str(e)}")
 
     return {
         "message": f"Found {total_results} matching products",
@@ -219,7 +264,13 @@ async def get_search_history(
                 "topMatch": item.get("topMatch"),
                 "resultCount": item.get("resultCount")
             })
-        return {"user_id": user_id, "history": history, "count": len(results), "limit": limit, "offset": offset}
+        return {
+            "user_id": user_id, 
+            "history": history, 
+            "count": len(results), 
+            "limit": limit, 
+            "offset": offset
+        }
     except Exception as e:
         logging.error(f"Failed to query search history: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to retrieve search history")
@@ -227,7 +278,7 @@ async def get_search_history(
 
 @router.get("/search/recent")
 async def get_recent_searches(user_id: str):
-    """Returns recent search terms for a user."""
+    """Returns a simple list of recent search terms (text queries or image categories)."""
     history_container = get_history_container()
     if not history_container:
         raise HTTPException(status_code=500, detail="Search history container not initialized")
@@ -245,7 +296,7 @@ async def get_recent_searches(user_id: str):
         ]
         return {"user_id": user_id, "recent_searches": recent_terms, "count": len(recent_terms)}
     except Exception as e:
-        logging.error(f"Failed to fetch recent searches: {str(e)}")
+        logging.error(f"Failed to fetch recent searches for {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to retrieve recent searches")
 
 
@@ -260,5 +311,5 @@ async def delete_search_history_item(user_id: str, search_id: str):
         history_container.delete_item(item=search_id, partition_key=user_id)
         return {"message": "Search history item deleted successfully"}
     except Exception as e:
-        logging.error(f"Failed to delete history item: {str(e)}")
+        logging.error(f"Failed to delete history item {search_id}: {str(e)}")
         raise HTTPException(status_code=404, detail="Item not found or could not be deleted")

@@ -3,10 +3,8 @@ uvicorn
 python-multipart
 requests
 python-dotenv
+pydantic-settings
 thefuzz
 python-Levenshtein
-# Azure Storage
 azure-storage-blob
-
-# Azure Cosmos DB
 azure-cosmos
