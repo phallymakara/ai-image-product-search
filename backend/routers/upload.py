@@ -38,11 +38,11 @@ async def upload_image(
     # 1. Duplicate detection
     image_hash = hashlib.sha256(file_bytes).hexdigest()
     try:
-        existing = list(container.query_items(
+        items = container.query_items(
             query="SELECT * FROM c WHERE c.image_hash = @hash",
-            parameters=[{"name": "@hash", "value": image_hash}],
-            enable_cross_partition_query=True
-        ))
+            parameters=[{"name": "@hash", "value": image_hash}]
+        )
+        existing = [item async for item in items]
         if existing:
             return {
                 "message": "Image already exists in the system", 
@@ -93,7 +93,7 @@ async def upload_image(
 
     # 5. Save to Cosmos DB
     try:
-        container.upsert_item(product_data)
+        await container.upsert_item(product_data)
         logging.info(f"Product {product_id} uploaded successfully by user {user_id}")
     except Exception as e:
         logging.error(f"Database save failed for {product_id}: {str(e)}")

@@ -1,3 +1,4 @@
+import uuid
 import logging
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -5,8 +6,111 @@ from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Depends
 
 from database.cosmos import get_product_container, get_history_container
+from models.product import ProductCreate, ProductUpdate, ProductResponse
 
 router = APIRouter(tags=["Products"])
+
+
+@router.post("/products", response_model=ProductResponse, status_code=201)
+async def create_product(
+    product: ProductCreate,
+    container = Depends(get_product_container)
+):
+    """Manually creates a new product."""
+    if not container:
+        raise HTTPException(status_code=500, detail="Database connection not initialized")
+    
+    product_id = f"P{str(uuid.uuid4())[:7]}"
+    product_data = product.dict()
+    product_data["id"] = product_id
+    product_data["productId"] = product_id
+
+    try:
+        new_product = await container.upsert_item(product_data)
+        return new_product
+    except Exception as e:
+        logging.error(f"Failed to create product: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create product")
+
+
+@router.get("/products/trending")
+async def get_trending_products(
+    container = Depends(get_product_container),
+    history_container = Depends(get_history_container)
+):
+    """Returns the most searched products in the last 30 days."""
+    if not container or not history_container:
+        raise HTTPException(status_code=500, detail="Database connection not initialized")
+
+    DAYS, LIMIT = 30, 5
+    start_date = (datetime.utcnow() - timedelta(days=DAYS)).isoformat()
+
+    try:
+        # 1. Get recent search matches
+        history_items = history_container.query_items(
+            query="SELECT c.topMatch.productId FROM c WHERE c.timestamp >= @start_date AND IS_DEFINED(c.topMatch.productId)",
+            parameters=[{"name": "@start_date", "value": start_date}]
+        )
+        results = [item async for item in history_items]
+
+        # 2. Count occurrences
+        id_counts = defaultdict(int)
+        for item in results:
+            pid = item.get("productId")
+            if pid:
+                id_counts[pid] += 1
+
+        if not id_counts:
+            return {"trending_products": [], "count": 0}
+
+        # 3. Get top product IDs
+        sorted_items = sorted(id_counts.items(), key=lambda x: x[1], reverse=True)[:LIMIT]
+        top_pids = [pid for pid, _ in sorted_items]
+
+        # 4. Fetch full metadata
+        pid_placeholders = [f"@pid{i}" for i in range(len(top_pids))]
+        pid_params = [{"name": f"@pid{i}", "value": pid} for i, pid in enumerate(top_pids)]
+
+        product_items = container.query_items(
+            query=f"SELECT * FROM c WHERE c.productId IN ({', '.join(pid_placeholders)})",
+            parameters=pid_params
+        )
+        db_products = [item async for item in product_items]
+
+        # 5. Attach counts and cleanup
+        trending_products = []
+        for prod in db_products:
+            prod_id = prod.get("productId")
+            prod["search_count"] = id_counts.get(prod_id, 0)
+            
+            for key in ["_rid", "_self", "_etag", "_attachments", "_ts"]:
+                prod.pop(key, None)
+            
+            trending_products.append(prod)
+
+        trending_products.sort(key=lambda x: x["search_count"], reverse=True)
+        return {"trending_products": trending_products, "count": len(trending_products)}
+    except Exception as e:
+        logging.error(f"Failed to fetch trending products: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve trending products")
+
+
+@router.get("/categories")
+async def list_categories(container = Depends(get_product_container)):
+    """Returns all unique product categories."""
+    if not container:
+        raise HTTPException(status_code=500, detail="Database connection not initialized")
+
+    try:
+        items = container.query_items(
+            query="SELECT DISTINCT VALUE c.category FROM c WHERE IS_DEFINED(c.category)"
+        )
+        results = [cat async for cat in items]
+        categories = sorted([cat for cat in results if cat])
+        return {"categories": categories, "count": len(categories)}
+    except Exception as e:
+        logging.error(f"Failed to fetch categories: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve categories")
 
 
 @router.get("/products")
@@ -30,11 +134,9 @@ async def list_products(
     query_str += f" OFFSET {offset} LIMIT {limit}"
 
     try:
-        results = list(container.query_items(
-            query=query_str, 
-            parameters=params, 
-            enable_cross_partition_query=True
-        ))
+        items = container.query_items(query=query_str, parameters=params)
+        results = [item async for item in items]
+        
         for item in results:
             for key in ["_rid", "_self", "_etag", "_attachments", "_ts"]:
                 item.pop(key, None)
@@ -51,83 +153,77 @@ async def list_products(
         raise HTTPException(status_code=500, detail="Failed to retrieve products")
 
 
-@router.get("/categories")
-async def list_categories(container = Depends(get_product_container)):
-    """Returns all unique product categories."""
+@router.get("/products/{product_id}", response_model=ProductResponse)
+async def get_product(
+    product_id: str, 
+    category: Optional[str] = None,
+    container = Depends(get_product_container)
+):
+    """
+    Retrieves a single product by its ID.
+    If category is provided, it uses a direct lookup (efficient).
+    If not, it performs a cross-partition query.
+    """
     if not container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
-
+    
     try:
-        results = list(container.query_items(
-            query="SELECT DISTINCT VALUE c.category FROM c WHERE IS_DEFINED(c.category)",
-            enable_cross_partition_query=True
-        ))
-        categories = sorted([cat for cat in results if cat])
-        return {"categories": categories, "count": len(categories)}
+        if category:
+            # Direct lookup (very fast)
+            product = await container.read_item(item=product_id, partition_key=category)
+            return product
+        else:
+            # Fallback: Query by ID across all partitions
+            items = container.query_items(
+                query="SELECT * FROM c WHERE c.id = @id",
+                parameters=[{"name": "@id", "value": product_id}]
+            )
+            results = [item async for item in items]
+            if not results:
+                raise HTTPException(status_code=404, detail="Product not found")
+            return results[0]
     except Exception as e:
-        logging.error(f"Failed to fetch categories: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve categories")
+        logging.error(f"Failed to fetch product {product_id}: {str(e)}")
+        raise HTTPException(status_code=404, detail="Product not found")
 
 
-@router.get("/products/trending")
-async def get_trending_products(
-    container = Depends(get_product_container),
-    history_container = Depends(get_history_container)
+@router.patch("/products/{product_id}", response_model=ProductResponse)
+async def update_product(
+    product_id: str,
+    category: str,
+    product_update: ProductUpdate,
+    container = Depends(get_product_container)
 ):
-    """Returns the most searched products in the last 30 days."""
-    if not container or not history_container:
+    """Updates specific fields of a product."""
+    if not container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
-
-    DAYS, LIMIT = 30, 5
-    start_date = (datetime.utcnow() - timedelta(days=DAYS)).isoformat()
-
+    
     try:
-        # 1. Get recent search matches
-        results = list(history_container.query_items(
-            query="SELECT c.topMatch.productId FROM c WHERE c.timestamp >= @start_date AND IS_DEFINED(c.topMatch.productId)",
-            parameters=[{"name": "@start_date", "value": start_date}],
-            enable_cross_partition_query=True
-        ))
-
-        # 2. Count occurrences
-        id_counts = defaultdict(int)
-        for item in results:
-            pid = item.get("productId")
-            if pid:
-                id_counts[pid] += 1
-
-        if not id_counts:
-            return {"trending_products": [], "count": 0}
-
-        # 3. Get top product IDs
-        sorted_items = sorted(id_counts.items(), key=lambda x: x[1], reverse=True)[:LIMIT]
-        top_pids = [pid for pid, _ in sorted_items]
-
-        # 4. Fetch full metadata
-        pid_placeholders = [f"@pid{i}" for i in range(len(top_pids))]
-        pid_params = [{"name": f"@pid{i}", "value": pid} for i, pid in enumerate(top_pids)]
-
-        db_products = list(container.query_items(
-            query=f"SELECT * FROM c WHERE c.productId IN ({', '.join(pid_placeholders)})",
-            parameters=pid_params,
-            enable_cross_partition_query=True
-        ))
-
-        # 5. Attach counts and cleanup
-        trending_products = []
-        for prod in db_products:
-            prod_id = prod.get("productId")
-            prod["search_count"] = id_counts.get(prod_id, 0)
-            
-            for key in ["_rid", "_self", "_etag", "_attachments", "_ts"]:
-                prod.pop(key, None)
-            
-            trending_products.append(prod)
-
-        # 6. Final sort
-        trending_products.sort(key=lambda x: x["search_count"], reverse=True)
+        existing_product = await container.read_item(item=product_id, partition_key=category)
+        update_data = product_update.dict(exclude_unset=True)
+        for key, value in update_data.items():
+            existing_product[key] = value
         
-        return {"trending_products": trending_products, "count": len(trending_products)}
+        updated_product = await container.upsert_item(existing_product)
+        return updated_product
     except Exception as e:
-        logging.error(f"Failed to fetch trending products: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve trending products")
+        logging.error(f"Failed to update product {product_id}: {str(e)}")
+        raise HTTPException(status_code=404, detail="Product not found or update failed")
+
+
+@router.delete("/products/{product_id}", status_code=204)
+async def delete_product(
+    product_id: str,
+    category: str,
+    container = Depends(get_product_container)
+):
+    """Deletes a product from the database."""
+    if not container:
+        raise HTTPException(status_code=500, detail="Database connection not initialized")
+    
+    try:
+        await container.delete_item(item=product_id, partition_key=category)
+        return None
+    except Exception as e:
+        logging.error(f"Failed to delete product {product_id}: {str(e)}")
+        raise HTTPException(status_code=404, detail="Product not found or deletion failed")
