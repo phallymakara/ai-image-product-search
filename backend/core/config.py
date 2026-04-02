@@ -2,6 +2,11 @@ import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
+# Get the directory of this file (backend/core/)
+# and then go up one level to get the backend/ root.
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ENV_FILE = os.path.join(BASE_DIR, ".env")
+
 class Settings(BaseSettings):
     # App Settings
     APP_NAME: str = "AI Product Image Search"
@@ -26,7 +31,7 @@ class Settings(BaseSettings):
     STORAGE_ACCOUNT_URL: Optional[str] = None
 
     model_config = SettingsConfigDict(
-        env_file=".env", 
+        env_file=ENV_FILE, 
         env_file_encoding="utf-8",
         extra="ignore"
     )
