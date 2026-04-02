@@ -2,10 +2,10 @@ import uuid
 import hashlib
 import logging
 from typing import Optional
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 
 from database.cosmos import get_product_container
-from services.storage import upload_to_blob
+from services.storage import upload_to_blob, get_blob_client
 from services.vision import analyze_image, ocr_image, extract_tags, extract_brands, detect_name, detect_category
 
 router = APIRouter(tags=["Upload"])
@@ -16,12 +16,13 @@ async def upload_image(
     user_id: str,
     name: Optional[str] = Form(None),
     category: Optional[str] = Form(None),
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    container = Depends(get_product_container),
+    blob_client = Depends(get_blob_client)
 ):
     """
     Uploads an image, detects duplicates, analyzes with Azure Vision, and saves to Cosmos DB.
     """
-    container = get_product_container()
     if not container:
         logging.error("Database connection not initialized during upload.")
         raise HTTPException(status_code=500, detail="Database connection not initialized")
@@ -50,13 +51,12 @@ async def upload_image(
             }
     except Exception as e:
         logging.error(f"Duplicate check failed: {str(e)}")
-        # Continue if duplicate check fails? Or fail? Usually safer to continue or log.
 
     product_id = f"P{str(uuid.uuid4())[:7]}"
 
     # 2. Upload to Storage
     try:
-        image_url = upload_to_blob(file_bytes, product_id, user_id)
+        image_url = upload_to_blob(file_bytes, product_id, user_id, blob_client)
     except Exception as e:
         logging.error(f"Storage upload failed for {product_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Storage upload failed: {str(e)}")

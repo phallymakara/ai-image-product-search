@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Optional, List
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 
 from database.cosmos import get_product_container, get_history_container
 
@@ -10,9 +10,13 @@ router = APIRouter(tags=["Products"])
 
 
 @router.get("/products")
-async def list_products(category: Optional[str] = None, limit: int = 50, offset: int = 0):
+async def list_products(
+    category: Optional[str] = None, 
+    limit: int = 50, 
+    offset: int = 0,
+    container = Depends(get_product_container)
+):
     """Returns products with optional category filtering and pagination."""
-    container = get_product_container()
     if not container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
 
@@ -48,9 +52,8 @@ async def list_products(category: Optional[str] = None, limit: int = 50, offset:
 
 
 @router.get("/categories")
-async def list_categories():
+async def list_categories(container = Depends(get_product_container)):
     """Returns all unique product categories."""
-    container = get_product_container()
     if not container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
 
@@ -67,11 +70,11 @@ async def list_categories():
 
 
 @router.get("/products/trending")
-async def get_trending_products():
+async def get_trending_products(
+    container = Depends(get_product_container),
+    history_container = Depends(get_history_container)
+):
     """Returns the most searched products in the last 30 days."""
-    container = get_product_container()
-    history_container = get_history_container()
-
     if not container or not history_container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
 

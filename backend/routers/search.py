@@ -3,10 +3,10 @@ import logging
 from datetime import datetime
 from collections import defaultdict
 from typing import Optional, List
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 
 from database.cosmos import get_product_container, get_history_container
-from services.storage import upload_search_image
+from services.storage import upload_search_image, get_blob_client
 from services.vision import analyze_image, ocr_image, extract_tags, extract_brands, detect_category
 from services.matching import score_product_by_image, score_product_by_text
 
@@ -17,16 +17,16 @@ router = APIRouter(tags=["Search"])
 async def search_similar_product(
     user_id: str,
     file: UploadFile = File(...),
-    category: Optional[str] = None
+    category: Optional[str] = None,
+    container = Depends(get_product_container),
+    history_container = Depends(get_history_container),
+    blob_client = Depends(get_blob_client)
 ):
     """
     Image-based product search. 
     Score = 0.4*tags + 0.3*brands + 0.3*ocr.
     Supports OCR-only search if no tags/brands are found.
     """
-    container = get_product_container()
-    history_container = get_history_container()
-
     if not container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
 
@@ -39,7 +39,7 @@ async def search_similar_product(
     search_id = f"S{str(uuid.uuid4())[:7]}"
 
     # 1. Upload for history
-    search_image_url = upload_search_image(file_bytes, search_id, user_id)
+    search_image_url = upload_search_image(file_bytes, search_id, user_id, blob_client)
 
     # 2. Analyze
     analysis_result = analyze_image(file_bytes)
@@ -93,8 +93,8 @@ async def search_similar_product(
             for product in db_results:
                 product["match_score"] = score_product_by_image(product, search_tags, search_brands, ocr_text)
 
-            # Filter out very low scores (optional, but keeps results relevant)
-            db_results = [p for p in db_results if p.get("match_score", 0) > 0.1]
+            # Filter results for high confidence (only return matches with score > 0.5)
+            db_results = [p for p in db_results if p.get("match_score", 0) > 0.5]
             
             db_results.sort(key=lambda x: x["match_score"], reverse=True)
             top_matches = db_results[:5]
@@ -141,15 +141,14 @@ async def search_by_text(
     user_id: str,
     query: str,
     category: Optional[str] = None,
-    limit: int = 5
+    limit: int = 5,
+    container = Depends(get_product_container),
+    history_container = Depends(get_history_container)
 ):
     """
     Text-based product search. 
     Score = 0.5*name + 0.2*tags + 0.1*brands + 0.2*ocr.
     """
-    container = get_product_container()
-    history_container = get_history_container()
-
     if not container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
 
@@ -231,10 +230,10 @@ async def get_search_history(
     user_id: str,
     category: Optional[str] = None,
     limit: int = 50,
-    offset: int = 0
+    offset: int = 0,
+    history_container = Depends(get_history_container)
 ):
     """Returns search history grouped by day."""
-    history_container = get_history_container()
     if not history_container:
         raise HTTPException(status_code=500, detail="Search history container not initialized")
 
@@ -277,9 +276,11 @@ async def get_search_history(
 
 
 @router.get("/search/recent")
-async def get_recent_searches(user_id: str):
+async def get_recent_searches(
+    user_id: str,
+    history_container = Depends(get_history_container)
+):
     """Returns a simple list of recent search terms (text queries or image categories)."""
-    history_container = get_history_container()
     if not history_container:
         raise HTTPException(status_code=500, detail="Search history container not initialized")
 
@@ -301,9 +302,12 @@ async def get_recent_searches(user_id: str):
 
 
 @router.delete("/search/history/{search_id}")
-async def delete_search_history_item(user_id: str, search_id: str):
+async def delete_search_history_item(
+    user_id: str, 
+    search_id: str,
+    history_container = Depends(get_history_container)
+):
     """Deletes a specific search history item."""
-    history_container = get_history_container()
     if not history_container:
         raise HTTPException(status_code=500, detail="Search history container not initialized")
 
