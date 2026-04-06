@@ -10,10 +10,10 @@
 
 ## Business Use Cases
 
-- 🛒 Retail product lookup
-- 🏭 Warehouse inventory checking
-- 📦 Distributor product verification
-- 🧑‍💼 Field sales product identification
+- Retail product lookup
+- Warehouse inventory checking
+- Distributor product verification
+- Field sales product identification
 
 ## Tech Stack
 

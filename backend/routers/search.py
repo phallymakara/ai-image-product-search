@@ -285,7 +285,7 @@ async def get_recent_searches(
     user_id: str,
     history_container = Depends(get_history_container)
 ):
-    """Returns a simple list of recent search terms (text queries or image categories)."""
+    """Returns a list of recent searches with their type for filtering."""
     if not history_container:
         raise HTTPException(status_code=500, detail="Search history container not initialized")
 
@@ -296,12 +296,7 @@ async def get_recent_searches(
         )
         results = [item async for item in items]
         
-        recent_terms = [
-            item.get("queryText") if item.get("searchType") == "text"
-            else f"Image: {item.get('category', 'Unknown')}"
-            for item in results
-        ]
-        return {"user_id": user_id, "recent_searches": recent_terms, "count": len(recent_terms)}
+        return {"user_id": user_id, "recent_searches": results, "count": len(results)}
     except Exception as e:
         logging.error(f"Failed to fetch recent searches for {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to retrieve recent searches")

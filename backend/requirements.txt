@@ -9,3 +9,4 @@ python-Levenshtein
 azure-storage-blob
 azure-cosmos
 aiohttp
+finally
