@@ -18,7 +18,10 @@ def analyze_image(image_bytes: bytes) -> Dict[str, Any]:
     try:
         response = requests.post(url, headers=headers, data=image_bytes, timeout=10)
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        logging.info(f"Vision API categories: {result.get('categories', [])}")
+        logging.info(f"Vision API tags: {result.get('tags', [])}")
+        return result
     except requests.exceptions.RequestException as e:
         logging.error(f"Error calling Vision API: {str(e)}")
         return {}
@@ -55,7 +58,7 @@ def extract_tags(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     tags = result.get("tags", [])
     return [
         {"name": tag["name"], "confidence": round(tag["confidence"], 3)}
-        for tag in tags if tag.get("confidence", 0) > 0.5
+        for tag in tags if tag.get("confidence", 0) > 0.1
     ]
 
 def extract_brands(result: Dict[str, Any]) -> List[str]:
@@ -68,9 +71,14 @@ def detect_category(result: Dict[str, Any], tags: List[Dict]) -> str:
     categories = result.get("categories", [])
     if categories:
         raw_cat = categories[0].get("name", "")
-        return raw_cat.split("_")[0] if "_" in raw_cat else raw_cat
-    elif tags:
+        if raw_cat:
+            return raw_cat.split("_")[0] if "_" in raw_cat else raw_cat
+    if tags:
         return tags[0]["name"]
+    
+    all_tags = result.get("tags", [])
+    if all_tags:
+        return all_tags[0].get("name", "uncategorized")
     return "uncategorized"
 
 def detect_name(result: Dict[str, Any], brands: List[str], tags: List[Dict]) -> str:

@@ -13,7 +13,7 @@ router = APIRouter(tags=["Upload"])
 
 @router.post("/upload")
 async def upload_image(
-    user_id: str,
+    user_id: str = Form(...),
     name: Optional[str] = Form(None),
     category: Optional[str] = Form(None),
     file: UploadFile = File(...),
@@ -54,28 +54,33 @@ async def upload_image(
 
     product_id = f"P{str(uuid.uuid4())[:7]}"
 
-    # 2. Upload to Storage
-    try:
-        image_url = upload_to_blob(file_bytes, product_id, user_id, blob_client)
-    except Exception as e:
-        logging.error(f"Storage upload failed for {product_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Storage upload failed: {str(e)}")
-
-    # 3. AI Analysis
+    # 2. AI Analysis (do this BEFORE blob upload to avoid Azure Function race condition)
     analysis_result = analyze_image(file_bytes)
     ocr_text = ocr_image(file_bytes)
     tags = extract_tags(analysis_result)
     brands = extract_brands(analysis_result)
 
-    # 4. Metadata Logic
-    is_name_missing = not name or name.strip() == "" or name.lower() == "string"
-    is_cat_missing = not category or category.strip() == "" or category.lower() == "string"
+    # 3. Metadata Logic - User input takes priority over AI detection
+    logging.info(f"Upload received - name: '{name}', category: '{category}'")
+    
+    if name and name.strip():
+        final_name = name.strip()
+        logging.info(f"Using user-provided name: '{final_name}'")
+    else:
+        final_name = detect_name(analysis_result, brands, tags)
+        logging.info(f"Using AI-detected name: '{final_name}'")
+    
+    if category and category.strip():
+        final_category = category.strip()
+        logging.info(f"Using user-provided category: '{final_category}'")
+    else:
+        final_category = detect_category(analysis_result, tags)
+        logging.info(f"Using AI-detected category: '{final_category}'")
+    
+    name = final_name
+    category = final_category
 
-    if is_name_missing:
-        name = detect_name(analysis_result, brands, tags)
-    if is_cat_missing:
-        category = detect_category(analysis_result, tags)
-
+    # 4. Save to Cosmos DB FIRST (before blob upload to prevent Azure Function race condition)
     product_data = {
         "id": product_id,
         "productId": product_id,
@@ -85,10 +90,34 @@ async def upload_image(
         "tags": tags,
         "brands": brands,
         "ocr_text": ocr_text,
-        "imageUrl": image_url,
+        "imageUrl": "",  # Will be updated after blob upload
         "userId": user_id,
         "enhanced_search": True,
         "upload_source": "api"
+    }
+
+    try:
+        await container.upsert_item(product_data)
+        logging.info(f"Product {product_id} saved to Cosmos DB")
+    except Exception as e:
+        logging.error(f"Database save failed for {product_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database save failed for {product_id}: {str(e)}")
+
+    # 5. Upload to Storage (after DB save - Azure Function will find existing product)
+    try:
+        image_url = upload_to_blob(file_bytes, product_id, user_id, blob_client)
+        # Update the imageUrl in Cosmos DB
+        product_data["imageUrl"] = image_url
+        await container.upsert_item(product_data)
+        logging.info(f"Product {product_id} uploaded to blob storage and imageUrl updated")
+    except Exception as e:
+        logging.error(f"Storage upload failed for {product_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Storage upload failed: {str(e)}")
+
+    return {
+        "message": "Product uploaded successfully", 
+        "is_duplicate": False, 
+        "data": product_data
     }
 
     # 5. Save to Cosmos DB

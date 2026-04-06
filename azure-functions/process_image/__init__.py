@@ -109,59 +109,87 @@ def main(myblob: func.InputStream):
         if not product_id:
             return
 
-        # 1. AI Processing
+        container = get_cosmos_container()
+        if not container:
+            logging.error("No Cosmos container available")
+            return
+
+        existing = None
+        # Try to find existing product by querying (partition key might be different)
+        try:
+            items = list(container.query_items(
+                query="SELECT * FROM c WHERE c.id = @id",
+                parameters=[{"name": "@id", "value": product_id}],
+                enable_cross_partition_query=True
+            ))
+            if items:
+                existing = items[0]
+                logging.info(f"Product {product_id} already exists with name: '{existing.get('name')}', category: '{existing.get('category')}'")
+            else:
+                logging.info(f"Product {product_id} does not exist yet, will create new")
+        except Exception as e:
+            logging.info(f"Could not query for existing product: {str(e)}")
+
+        # Always do AI analysis (needed for tags, brands, ocr)
         analysis_result = analyze_image(image_bytes)
         ocr_text = ocr_image(image_bytes)
-        
-        # 2. Feature Extraction
-        tags = [
+        new_tags = [
             {"name": t["name"], "confidence": round(t["confidence"], 3)}
-            for t in analysis_result.get("tags", []) if t["confidence"] > 0.5
+            for t in analysis_result.get("tags", []) if t["confidence"] > 0.1
         ]
-        brands = [b["name"] for b in analysis_result.get("brands", [])]
-        
-        # 3. Metadata Determination
-        description = analysis_result.get("description", {}).get("captions", [])
-        name = "Unknown Product"
-        if description:
-            name = description[0].get("text", "").capitalize()
-        elif brands:
-            name = f"{brands[0]} Product"
-        elif analysis_result.get("objects"):
-            name = analysis_result["objects"][0].get("object", "").capitalize()
-        elif tags:
-            name = tags[0]["name"].capitalize()
-            
-        category = "uncategorized"
-        categories = analysis_result.get("categories", [])
-        if categories:
-            raw_cat = categories[0].get("name", "")
-            category = raw_cat.split("_")[0] if "_" in raw_cat else raw_cat
-        elif tags:
-            category = tags[0]["name"]
+        new_brands = [b["name"] for b in analysis_result.get("brands", [])]
 
-        # 4. Prepare and Save Data
-        image_url = f"{STORAGE_ACCOUNT_URL}/{myblob.name}" if STORAGE_ACCOUNT_URL else myblob.name
+        if existing:
+            # Product exists (uploaded via API) - PRESERVE user-provided name and category
+            existing["tags"] = new_tags
+            existing["brands"] = new_brands
+            existing["ocr_text"] = ocr_text
+            existing["source"] = "azure-function-processor"
+            existing["enhanced_search"] = True
+            existing["processedAt"] = True
+            container.upsert_item(existing)
+            logging.info(f"Updated existing product {product_id} (preserved user-provided name/category)")
+        else:
+            # New product (direct blob upload) - use AI for everything
+            description = analysis_result.get("description", {}).get("captions", [])
+            name = "Unknown Product"
+            if description:
+                name = description[0].get("text", "").capitalize()
+            elif new_brands:
+                name = f"{new_brands[0]} Product"
+            elif analysis_result.get("objects"):
+                name = analysis_result["objects"][0].get("object", "").capitalize()
+            elif new_tags:
+                name = new_tags[0]["name"].capitalize()
+                
+            category = "uncategorized"
+            categories = analysis_result.get("categories", [])
+            if categories:
+                raw_cat = categories[0].get("name", "")
+                category = raw_cat.split("_")[0] if "_" in raw_cat else raw_cat
+            elif new_tags:
+                category = new_tags[0]["name"]
 
-        product_data = {
-            "id": product_id,
-            "productId": product_id,
-            "name": name,
-            "category": category,
-            "tags": tags,
-            "brands": brands,
-            "ocr_text": ocr_text,
-            "imageUrl": image_url,
-            "userId": user_id,
-            "source": "azure-function-processor",
-            "enhanced_search": True,
-            "processedAt": True
-        }
+            # 4. Prepare and Save Data
+            image_url = f"{STORAGE_ACCOUNT_URL}/{myblob.name}" if STORAGE_ACCOUNT_URL else myblob.name
 
-        container = get_cosmos_container()
-        if container:
+            product_data = {
+                "id": product_id,
+                "productId": product_id,
+                "name": name,
+                "category": category,
+                "tags": new_tags,
+                "brands": new_brands,
+                "ocr_text": ocr_text,
+                "imageUrl": image_url,
+                "userId": user_id,
+                "source": "azure-function-processor",
+                "enhanced_search": True,
+                "processedAt": True
+            }
+
             container.upsert_item(product_data)
-            logging.info(f"Successfully processed product: {product_id}")
+            logging.info(f"Created new product {product_id}")
 
     except Exception as e:
         logging.error(f"Error in background processor: {str(e)}")
