@@ -1,3 +1,4 @@
+cat > .gitignore << 'EOF'
 # Environment / Secrets
 .env
 .env.*
@@ -20,7 +21,7 @@ __pycache__/
 .azurefunctions/
 bin/
 obj/
-local.settings.json  # contains secrets (VERY IMPORTANT)
+local.settings.json
 
 # VS Code / IDE
 .vscode/
@@ -34,3 +35,7 @@ Thumbs.db
 backend/uploads/
 *.tmp
 *.temp
+
+# Frontend dependencies
+ai-product-frontend/node_modules/
+EOF
