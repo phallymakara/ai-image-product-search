@@ -6,6 +6,7 @@ import SearchResult from "../components/SearchResult";
 import Navbar from "../components/Navbar";
 
 export default function Home() {
+  const [language, setLanguage] = useState(localStorage.getItem("language") || "en");
   const [activeTab, setActiveTab] = useState("image");
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
@@ -20,6 +21,53 @@ export default function Home() {
 
   const { results, loading, error, performImageSearch, performTextSearch } =
     useSearch();
+
+  const translations = {
+    en: {
+      image: "IMAGE",
+      text: "TEXT",
+      upload_placeholder: "Upload or drop product photo",
+      search_placeholder: "What are you looking for?",
+      find_matches: "Find Matches",
+      discovering: "Discovering...",
+      upload_image: "Upload Image",
+      uploading: "Uploading...",
+      confirm_upload: "Confirm Upload",
+      recent: "RECENT:",
+      no_recent: "No recent searches",
+      trending: "Trending Products",
+      view_all: "View All",
+      loading_trends: "Loading trends...",
+      prod_name_opt: "Product name (optional)",
+      category_opt: "Category (optional)"
+    },
+    km: {
+      image: "រូបភាព",
+      text: "អត្ថបទ",
+      upload_placeholder: "ដាក់រូបភាពផលិតផលទីនេះ",
+      search_placeholder: "តើអ្នកកំពុងស្វែងរកអ្វី?",
+      find_matches: "ស្វែងរក",
+      discovering: "កំពុងស្វែងរក...",
+      upload_image: "បញ្ចូលរូបភាព",
+      uploading: "កំពុងបញ្ចូល...",
+      confirm_upload: "បញ្ជាក់ការបញ្ចូល",
+      recent: "ថ្មីៗ:",
+      no_recent: "មិនមានការស្វែងរកថ្មីៗទេ",
+      trending: "ផលិតផលពេញនិយម",
+      view_all: "មើលទាំងអស់",
+      loading_trends: "កំពុងផ្ទុក...",
+      prod_name_opt: "ឈ្មោះផលិតផល (មិនបង្ខំ)",
+      category_opt: "ប្រភេទ (មិនបង្ខំ)"
+    }
+  };
+
+  const t = (key) => translations[language][key] || key;
+
+  const toggleLanguage = () => {
+    const newLang = language === "en" ? "km" : "en";
+    setLanguage(newLang);
+    localStorage.setItem("language", newLang);
+  };
 
   const USER_ID = "U123";
 
@@ -127,9 +175,30 @@ export default function Home() {
             borderRadius: "var(--radius-lg)",
             boxShadow: "var(--shadow-md)",
             border: "1px solid var(--border-light)",
+            position: "relative"
           }}
           className="search-container"
         >
+          {/* Language Toggle */}
+          <button
+            onClick={toggleLanguage}
+            style={{
+              position: "absolute",
+              top: "16px",
+              right: "16px",
+              padding: "4px 10px",
+              fontSize: "12px",
+              fontWeight: "bold",
+              borderRadius: "6px",
+              border: "1px solid var(--border-light)",
+              backgroundColor: "white",
+              cursor: "pointer",
+              zIndex: 10
+            }}
+          >
+            {language === "en" ? "ភាសាខ្មែរ" : "English"}
+          </button>
+
           <div
             style={{
               display: "flex",
@@ -137,18 +206,18 @@ export default function Home() {
               marginBottom: "24px",
               justifyContent: "center",
             }}>
-            {["image", "text"].map((t) => (
+            {["image", "text"].map((tabKey) => (
               <button
-                key={t}
-                onClick={() => setActiveTab(t)}
+                key={tabKey}
+                onClick={() => setActiveTab(tabKey)}
                 style={{
                   padding: "6px 20px",
                   borderRadius: "20px",
                   border: "none",
                   backgroundColor:
-                    activeTab === t ? "var(--brand-light)" : "transparent",
+                    activeTab === tabKey ? "var(--brand-light)" : "transparent",
                   color:
-                    activeTab === t ?
+                    activeTab === tabKey ?
                       "var(--brand-primary)"
                     : "var(--text-muted)",
                   fontWeight: "700",
@@ -156,7 +225,7 @@ export default function Home() {
                   fontSize: "12px",
                   transition: "all 0.2s",
                 }}>
-                {t.toUpperCase()}
+                {t(tabKey)}
               </button>
             ))}
           </div>
@@ -194,7 +263,7 @@ export default function Home() {
                       fontWeight: "500",
                       margin: 0,
                     }}>
-                    Upload or drop product photo
+                    {t("upload_placeholder")}
                   </p>
                 : <img
                     src={preview}
@@ -245,7 +314,7 @@ export default function Home() {
           : <div style={{ marginBottom: "20px" }}>
               <input
                 type="text"
-                placeholder="What are you looking for?"
+                placeholder={t("search_placeholder")}
                 value={textQuery}
                 onChange={(e) => setTextQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && onSearch()}
@@ -279,7 +348,7 @@ export default function Home() {
               }
               className="btn-primary"
               style={{ padding: "12px 24px", borderRadius: "30px", flex: "1 1 auto", minWidth: "140px" }}>
-              {loading ? "Discovering..." : "Find Matches"}
+              {loading ? t("discovering") : t("find_matches")}
             </button>
 
             {activeTab === "image" && (
@@ -289,7 +358,7 @@ export default function Home() {
                 className="btn-secondary"
                 style={{ padding: "12px 24px", borderRadius: "30px", flex: "1 1 auto", minWidth: "140px" }}
               >
-                {uploadLoading ? "Uploading..." : (showUploadForm ? "Confirm Upload" : "Upload Image")}
+                {uploadLoading ? t("uploading") : (showUploadForm ? t("confirm_upload") : t("upload_image"))}
               </button>
             )}
           </div>
@@ -311,7 +380,7 @@ export default function Home() {
                 color: "var(--text-muted)",
                 whiteSpace: "nowrap",
               }}>
-              RECENT:
+              {t("recent")}
             </span>
             <div style={{ display: "flex", gap: "8px" }}>
               {filteredRecent.slice(0, 5).map((item, i) => (
@@ -337,7 +406,7 @@ export default function Home() {
               ))}
               {filteredRecent.length === 0 && (
                 <span style={{ fontSize: "11px", color: "#cbd5e1" }}>
-                  No recent searches
+                  {t("no_recent")}
                 </span>
               )}
             </div>
@@ -364,7 +433,7 @@ export default function Home() {
                   alignItems: "center",
                   gap: "8px",
                 }}>
-                <span style={{ fontSize: "22px" }}></span> Trending Products
+                <span style={{ fontSize: "22px" }}></span> {t("trending")}
               </h3>
               <button
                 onClick={() => (window.location.href = "/products")}
@@ -376,13 +445,13 @@ export default function Home() {
                   fontWeight: "700",
                   cursor: "pointer",
                 }}>
-                View All
+                {t("view_all")}
               </button>
             </div>
 
             {sideLoading ?
               <p style={{ textAlign: "center", color: "var(--text-muted)" }}>
-                Loading trends...
+                {t("loading_trends")}
               </p>
             : <div
                 style={{

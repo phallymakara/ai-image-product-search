@@ -4,3 +4,4 @@ azure-cosmos
 python-dotenv
 thefuzz
 python-Levenshtein
+khmer-nltk
