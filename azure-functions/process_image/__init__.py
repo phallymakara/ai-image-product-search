@@ -3,6 +3,7 @@ import azure.functions as func
 import requests
 import os
 import json
+import time
 from azure.cosmos import CosmosClient, PartitionKey
 from dotenv import load_dotenv
 
@@ -66,8 +67,8 @@ def ocr_image(image_bytes):
     if not VISION_ENDPOINT or not VISION_KEY:
         return ""
 
-    url = f"{VISION_ENDPOINT}/vision/v3.2/ocr?language=unk&detectOrientation=true"
-
+    # Step 1: Submit to Read API
+    url = f"{VISION_ENDPOINT}/vision/v3.2/read/analyze"
     headers = {
         "Ocp-Apim-Subscription-Key": VISION_KEY,
         "Content-Type": "application/octet-stream"
@@ -75,14 +76,28 @@ def ocr_image(image_bytes):
 
     try:
         response = requests.post(url, headers=headers, data=image_bytes)
-        if response.status_code == 200:
-            data = response.json()
-            text_parts = []
-            for region in data.get("regions", []):
-                for line in region.get("lines", []):
-                    for word in line.get("words", []):
-                        text_parts.append(word.get("text", ""))
-            return " ".join(text_parts)
+        response.raise_for_status()
+        
+        operation_url = response.headers.get("Operation-Location")
+        if not operation_url:
+            return ""
+
+        # Step 2: Poll
+        for _ in range(10):
+            result_res = requests.get(operation_url, headers={"Ocp-Apim-Subscription-Key": VISION_KEY})
+            result_data = result_res.json()
+
+            if result_data.get("status") == "succeeded":
+                text_parts = []
+                for res in result_data.get("analyzeResult", {}).get("readResults", []):
+                    for line in res.get("lines", []):
+                        text_parts.append(line.get("text", ""))
+                return " ".join(text_parts)
+            
+            if result_data.get("status") == "failed":
+                return ""
+            time.sleep(1)
+
     except Exception as e:
         logging.error(f"OCR Error: {str(e)}")
     return ""

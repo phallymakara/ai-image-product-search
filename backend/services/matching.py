@@ -1,6 +1,48 @@
 from thefuzz import fuzz
+import re
 from typing import List, Dict, Any
 
+try:
+    from khmernltk import word_tokenize
+    KHMER_AVAILABLE = True
+except ImportError:
+    KHMER_AVAILABLE = False
+
+def contains_khmer(text: str) -> bool:
+    """Checks if a string contains Khmer characters (Unicode range U+1780 to U+17FF)."""
+    return bool(re.search(r'[\u1780-\u17FF]', text))
+
+def smart_tokenize(text: str) -> List[str]:
+    """Tokenizes text based on language detection."""
+    if not text:
+        return []
+    
+    # If Khmer is detected and library is available, use special tokenizer
+    if contains_khmer(text) and KHMER_AVAILABLE:
+        try:
+            return word_tokenize(text)
+        except Exception:
+            # Fallback to character-based or space-based if khmer-nltk fails
+            return text.split()
+    
+    # Default to space-based tokenization for English/others
+    return text.split()
+
+def get_token_score(query: str, target: str, scorer=fuzz.token_set_ratio) -> float:
+    """
+    Enhanced token-based scoring that handles Khmer by pre-segmenting tokens.
+    """
+    if not query or not target:
+        return 0.0
+    
+    # If Khmer is involved, we join segmented tokens with spaces so fuzz.token_set_ratio 
+    # can work correctly (it normally splits by space).
+    if contains_khmer(query) or contains_khmer(target):
+        q_tokens = " ".join(smart_tokenize(query))
+        t_tokens = " ".join(smart_tokenize(target))
+        return scorer(q_tokens, t_tokens) / 100.0
+    
+    return scorer(query, target) / 100.0
 
 def score_product_by_image(
     product: Dict[str, Any],
@@ -26,6 +68,7 @@ def score_product_by_image(
         missed_search = set(search_tags_lower) - common_tags
         fuzzy_extra = 0
         for s_tag in missed_search:
+            # Use improved ratio for Khmer if needed
             best_fuzzy = max([fuzz.ratio(s_tag, p_tag) for p_tag in prod_tags]) / 100.0 if prod_tags else 0
             if best_fuzzy > 0.8:
                 fuzzy_extra += best_fuzzy
@@ -51,9 +94,9 @@ def score_product_by_image(
     ocr_score = 0
     if ocr_text:
         ocr_score = max(
-            fuzz.token_set_ratio(ocr_text.lower(), prod_ocr),
-            fuzz.token_set_ratio(ocr_text.lower(), prod_name)
-        ) / 100.0
+            get_token_score(ocr_text.lower(), prod_ocr),
+            get_token_score(ocr_text.lower(), prod_name)
+        )
 
     # 4. WEIGHTED TOTAL
     # If no OCR or brands detected, put more weight on tags
@@ -83,17 +126,16 @@ def score_product_by_text(product: Dict[str, Any], query: str) -> float:
     """
     query_lower = query.lower()
 
-    name_score = fuzz.token_set_ratio(query_lower, product.get("name", "").lower()) / 100.0
+    name_score = get_token_score(query_lower, product.get("name", "").lower())
 
     prod_tags = [t["name"].lower() for t in product.get("tags", [])]
-    tag_score = max([fuzz.token_set_ratio(query_lower, t) for t in prod_tags]) / 100.0 \
-        if prod_tags else 0
+    tag_score = max([get_token_score(query_lower, t) for t in prod_tags]) if prod_tags else 0
 
     prod_brands = [b.lower() for b in product.get("brands", [])]
-    brand_score = max([fuzz.token_set_ratio(query_lower, b) for b in prod_brands]) / 100.0 \
-        if prod_brands else 0
+    brand_score = max([get_token_score(query_lower, b) for b in prod_brands]) if prod_brands else 0
 
     ocr_text = product.get("ocr_text", "").lower()
-    ocr_score = fuzz.partial_ratio(query_lower, ocr_text) / 100.0 if ocr_text else 0
+    ocr_score = get_token_score(query_lower, ocr_text, scorer=fuzz.partial_ratio) if ocr_text else 0
 
     return round((0.5 * name_score) + (0.2 * tag_score) + (0.1 * brand_score) + (0.2 * ocr_score), 3)
+
