@@ -1,3 +1,7 @@
+import os
+# Fix for OpenMP duplicate library error on macOS (Torch + FAISS conflict)
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from database.cosmos import init_cosmos, close_cosmos

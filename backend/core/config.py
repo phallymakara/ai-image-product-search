@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     # Storage URL (for direct link generation)
     STORAGE_ACCOUNT_URL: Optional[str] = None
 
+    # Vector Search Settings
+    CLIP_MODEL_NAME: str = "ViT-B-32"
+    CLIP_PRETRAINED_DATASET: str = "laion2b_s34b_b79k"
+    FAISS_INDEX_PATH: str = os.path.join(BASE_DIR, "data", "products.index")
+    VECTOR_DIMENSION: int = 512
+
     model_config = SettingsConfigDict(
         env_file=ENV_FILE, 
         env_file_encoding="utf-8",

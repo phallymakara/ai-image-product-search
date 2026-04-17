@@ -9,9 +9,25 @@ from database.cosmos import get_product_container, get_history_container
 from services.storage import upload_search_image, get_blob_client
 from services.vision import analyze_image, ocr_image, extract_tags, extract_brands, detect_category
 from services.matching import score_product_by_image, score_product_by_text
+from services.vector_service import vector_service
+from services.index_service import index_service
 
 router = APIRouter(tags=["Search"])
 
+async def get_products_by_ids(container, product_ids: List[str]):
+    """Helper to fetch multiple products by their productId."""
+    if not product_ids:
+        return []
+    try:
+        query = "SELECT * FROM c WHERE ARRAY_CONTAINS(@ids, c.productId)"
+        items = container.query_items(
+            query=query,
+            parameters=[{"name": "@ids", "value": product_ids}]
+        )
+        return [item async for item in items]
+    except Exception as e:
+        logging.error(f"Failed to fetch products by IDs: {str(e)}")
+        return []
 
 @router.post("/search")
 async def search_similar_product(
@@ -23,8 +39,9 @@ async def search_similar_product(
     blob_client = Depends(get_blob_client)
 ):
     """
-    Image-based product search. 
-    Refined logic: lower threshold, fuzzy scoring, higher limit.
+    Semantic Image-based product search:
+    1. CLIP Vector Retrieval (Semantic)
+    2. Azure Vision Analysis (Contextual Re-ranking)
     """
     if not container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
@@ -40,7 +57,18 @@ async def search_similar_product(
     # 1. Upload for history
     search_image_url = upload_search_image(file_bytes, search_id, user_id, blob_client)
 
-    # 2. Analyze
+    # 2. SEMANTIC RETRIEVAL (CLIP + FAISS)
+    # This replaces the broad SQL keyword search
+    image_vector = vector_service.get_image_embedding(file_bytes)
+    vector_results = index_service.search(image_vector, top_k=40)
+    
+    if not vector_results:
+        return {"message": "No visually similar products found", "results": [], "searchId": search_id}
+        
+    vector_map = {pid: score for pid, score in vector_results}
+    
+    # 3. CONTEXTUAL ANALYSIS (Azure Vision)
+    # Used for boosting results with specific OCR text or Brands
     analysis_result = analyze_image(file_bytes)
     ocr_text = ocr_image(file_bytes).lower()
     search_tags_data = extract_tags(analysis_result)
@@ -48,62 +76,36 @@ async def search_similar_product(
     search_brands = [b.lower() for b in extract_brands(analysis_result)]
     detected_category = detect_category(analysis_result, search_tags_data)
 
-    top_matches = []
-    total_results = 0
+    # 4. FETCH & HYBRID SCORING
+    # Fetch ONLY the semantic candidates from Cosmos DB
+    db_results = await get_products_by_ids(container, list(vector_map.keys()))
+    
+    for product in db_results:
+        pid = product.get("productId")
+        v_score = vector_map.get(pid, 0.0)
+        
+        # Apply the weighted scoring logic (Vector + Tags + OCR + Brand)
+        product["match_score"] = score_product_by_image(
+            product, search_tags, search_brands, ocr_text, vector_score=v_score
+        )
 
-    # 3. Dynamic Query Construction
-    if search_tags or search_brands or ocr_text:
-        query_parts = ["SELECT * FROM c WHERE ("]
-        conditions = []
-        parameters = []
+    # 5. FILTER & RANKING
+    # Filter by category if requested by user
+    if category:
+        db_results = [p for p in db_results if p.get("category", "").lower() == category.lower()]
 
-        if search_tags:
-            # BROAD MATCH: If any search tag matches any product tag
-            conditions.append("EXISTS(SELECT VALUE t FROM t IN c.tags WHERE ARRAY_CONTAINS(@tags, t.name))")
-            parameters.append({"name": "@tags", "value": search_tags})
+    # Sort by the final combined score
+    db_results.sort(key=lambda x: x["match_score"], reverse=True)
+    
+    top_matches = db_results[:15]
+    total_results = len(db_results)
+    
+    # Cleanup Cosmos internal fields
+    for m in top_matches:
+        for key in ["_rid", "_self", "_etag", "_attachments", "_ts"]:
+            m.pop(key, None)
 
-        if search_brands:
-            conditions.append("EXISTS(SELECT VALUE b FROM b IN c.brands WHERE ARRAY_CONTAINS(@brands, b))")
-            parameters.append({"name": "@brands", "value": [b.capitalize() for b in search_brands]})
-
-        if ocr_text:
-            # OCR match can be broad
-            conditions.append("CONTAINS(LOWER(c.ocr_text), @ocr) OR CONTAINS(LOWER(c.name), @ocr)")
-            parameters.append({"name": "@ocr", "value": ocr_text[:30]})
-
-        query_parts.append(" OR ".join(conditions))
-        query_parts.append(")")
-
-        if category:
-            query_parts.append("AND STRINGEQUALS(c.category, @filter_category, true)")
-            parameters.append({"name": "@filter_category", "value": category})
-
-        try:
-            items = container.query_items(
-                query=" ".join(query_parts),
-                parameters=parameters
-            )
-            db_results = [item async for item in items]
-            
-            for product in db_results:
-                product["match_score"] = score_product_by_image(product, search_tags, search_brands, ocr_text)
-
-            # Lowered threshold to 0.3 for more results
-            db_results = [p for p in db_results if p.get("match_score", 0) >= 0.3]
-            db_results.sort(key=lambda x: x["match_score"], reverse=True)
-            
-            top_matches = db_results[:10] # Increased to 10
-            total_results = len(db_results)
-            
-            # Remove internal Cosmos fields
-            for m in top_matches:
-                for key in ["_rid", "_self", "_etag", "_attachments", "_ts"]:
-                    m.pop(key, None)
-                    
-        except Exception as e:
-            logging.error(f"Search query failed for {search_id}: {str(e)}")
-
-    # 4. History Logging
+    # 6. HISTORY LOGGING
     if history_container:
         top_match_preview = {
             "productId": top_matches[0].get("productId"),
@@ -141,13 +143,12 @@ async def search_by_text(
     user_id: str,
     query: str,
     category: Optional[str] = None,
-    limit: int = 10,
+    limit: int = 15,
     container = Depends(get_product_container),
     history_container = Depends(get_history_container)
 ):
     """
-    Text-based product search. 
-    Score = 0.5*name + 0.2*tags + 0.1*brands + 0.2*ocr.
+    Hybrid Text-based product search: CLIP Vectors + Keyword Matching.
     """
     if not container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
@@ -158,6 +159,15 @@ async def search_by_text(
     if not query_lower:
         raise HTTPException(status_code=400, detail="Search query cannot be empty")
 
+    # 1. Vector Search (Text-to-Image)
+    query_vector = vector_service.get_text_embedding(query_lower)
+    vector_results = index_service.search(query_vector, top_k=limit * 2)
+    vector_map = {pid: score for pid, score in vector_results}
+    
+    # 2. Fetch Initial Candidates
+    db_results = await get_products_by_ids(container, list(vector_map.keys()))
+
+    # 3. Keyword Search
     query_parts = [
         "SELECT * FROM c WHERE (CONTAINS(LOWER(c.name), @query) OR CONTAINS(LOWER(c.ocr_text), @query) "
         "OR EXISTS(SELECT VALUE t FROM t IN c.tags WHERE CONTAINS(LOWER(t.name), @query)) "
@@ -169,32 +179,34 @@ async def search_by_text(
         query_parts.append("AND STRINGEQUALS(c.category, @category, true)")
         parameters.append({"name": "@category", "value": category})
 
-    top_matches = []
-    total_results = 0
-
     try:
-        items = container.query_items(
-            query=" ".join(query_parts),
-            parameters=parameters
-        )
-        db_results = [item async for item in items]
+        items = container.query_items(query=" ".join(query_parts), parameters=parameters)
+        keyword_results = [item async for item in items]
         
-        for product in db_results:
-            product["match_score"] = score_product_by_text(product, query_lower)
-
-        db_results.sort(key=lambda x: x["match_score"], reverse=True)
-        top_matches = db_results[:limit]
-        total_results = len(db_results)
-        
-        for m in top_matches:
-            for key in ["_rid", "_self", "_etag", "_attachments", "_ts"]:
-                m.pop(key, None)
+        # Merge keyword results
+        existing_ids = {p["productId"] for p in db_results}
+        for p in keyword_results:
+            if p["productId"] not in existing_ids:
+                db_results.append(p)
                 
     except Exception as e:
-        logging.error(f"Text search failed for {search_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Search failed")
+        logging.error(f"Text search keyword query failed: {str(e)}")
 
-    # History Logging
+    # 4. Scoring & Ranking
+    for product in db_results:
+        pid = product.get("productId")
+        v_score = vector_map.get(pid, 0.0)
+        product["match_score"] = score_product_by_text(product, query_lower, vector_score=v_score)
+
+    db_results.sort(key=lambda x: x["match_score"], reverse=True)
+    top_matches = db_results[:limit]
+    total_results = len(db_results)
+    
+    for m in top_matches:
+        for key in ["_rid", "_self", "_etag", "_attachments", "_ts"]:
+            m.pop(key, None)
+
+    # 5. History Logging
     if history_container:
         top_match_preview = {
             "productId": top_matches[0].get("productId"),
