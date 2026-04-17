@@ -48,11 +48,12 @@ def score_product_by_image(
     product: Dict[str, Any],
     search_tags: List[str],
     search_brands: List[str],
-    ocr_text: str
+    ocr_text: str,
+    vector_score: float = 0.0
 ) -> float:
     """
     Scores a product against image search inputs.
-    Enhanced with fuzzy tag matching and weighted overlap.
+    Enhanced with CLIP vector similarity and fuzzy matching.
     """
     prod_tags = [t["name"].lower() for t in product.get("tags", [])]
     search_tags_lower = [t.lower() for t in search_tags]
@@ -99,30 +100,36 @@ def score_product_by_image(
         )
 
     # 4. WEIGHTED TOTAL
-    # If no OCR or brands detected, put more weight on tags
-    weights = {"tag": 0.4, "brand": 0.3, "ocr": 0.3}
+    # New weights including Vector Score (CLIP)
+    weights = {"vector": 0.5, "tag": 0.2, "brand": 0.15, "ocr": 0.15}
+    
+    # Dynamic weight redistribution if some data is missing
     if not search_brands:
-        weights["tag"] += 0.15
-        weights["ocr"] += 0.15
+        weights["vector"] += 0.075
+        weights["ocr"] += 0.075
         weights["brand"] = 0
     if not ocr_text:
-        weights["tag"] += 0.15
-        weights["brand"] += 0.15
+        weights["vector"] += 0.075
+        weights["tag"] += 0.075
         weights["ocr"] = 0
+    if vector_score == 0:
+        # Fallback to old-style scoring if no vector is provided
+        weights = {"tag": 0.4, "brand": 0.3, "ocr": 0.3}
 
     final_score = (
-        (weights["tag"] * tag_score) + 
-        (weights["brand"] * brand_match) + 
-        (weights["ocr"] * ocr_score)
+        (weights.get("vector", 0) * vector_score) +
+        (weights.get("tag", 0) * tag_score) + 
+        (weights.get("brand", 0) * brand_match) + 
+        (weights.get("ocr", 0) * ocr_score)
     )
     
     return round(final_score, 3)
 
 
-def score_product_by_text(product: Dict[str, Any], query: str) -> float:
+def score_product_by_text(product: Dict[str, Any], query: str, vector_score: float = 0.0) -> float:
     """
     Scores a product against a text search query.
-    Score = 0.5*name + 0.2*tags + 0.1*brands + 0.2*ocr
+    Score = 0.4*vector + 0.3*name + 0.1*tags + 0.1*brands + 0.1*ocr
     """
     query_lower = query.lower()
 
@@ -137,5 +144,12 @@ def score_product_by_text(product: Dict[str, Any], query: str) -> float:
     ocr_text = product.get("ocr_text", "").lower()
     ocr_score = get_token_score(query_lower, ocr_text, scorer=fuzz.partial_ratio) if ocr_text else 0
 
+    if vector_score > 0:
+        return round(
+            (0.4 * vector_score) + (0.3 * name_score) + 
+            (0.1 * tag_score) + (0.1 * brand_score) + (0.1 * ocr_score), 3
+        )
+    
+    # Fallback if no vector
     return round((0.5 * name_score) + (0.2 * tag_score) + (0.1 * brand_score) + (0.2 * ocr_score), 3)
 

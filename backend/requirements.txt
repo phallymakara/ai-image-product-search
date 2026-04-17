@@ -9,5 +9,10 @@ python-Levenshtein
 azure-storage-blob
 azure-cosmos
 aiohttp
-finally
 khmer-nltk
+torch
+torchvision
+open-clip-torch
+faiss-cpu
+Pillow
+numpy
