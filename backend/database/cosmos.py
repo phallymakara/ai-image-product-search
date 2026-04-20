@@ -29,15 +29,17 @@ async def init_cosmos():
 
     try:
         logging.info(f"Connecting to Cosmos DB at {settings.COSMOS_ENDPOINT}...")
+        logging.info(f"Using Database: {settings.COSMOS_DATABASE}")
+        logging.info(f"Target Product Container: '{settings.COSMOS_CONTAINER}'")
+        logging.info(f"Target History Container: '{settings.COSMOS_HISTORY_CONTAINER}'")
         
-        # FIX for macOS SSL Certificate issue: 
-        # We disable connection_verify if we encounter SSL issues in dev.
         _cosmos_client = CosmosClient(
             settings.COSMOS_ENDPOINT, 
             credential=settings.COSMOS_KEY,
-            connection_verify=False # Disables SSL verification to bypass local issuer certificate error
+            connection_verify=False
         )
         
+        # Test connection by listing databases or getting database
         database = await _cosmos_client.create_database_if_not_exists(id=settings.COSMOS_DATABASE)
         logging.info(f"Database ready: {settings.COSMOS_DATABASE}")
 
@@ -47,18 +49,22 @@ async def init_cosmos():
                 id=settings.COSMOS_CONTAINER,
                 partition_key=PartitionKey(path="/category")
             )
+            logging.info(f"Container ready: {settings.COSMOS_CONTAINER}")
         except Exception as container_err:
-            logging.error(f"Error initializing product container: {str(container_err)}")
-            raise Exception(f"Failed to access container '{settings.COSMOS_CONTAINER}'. Check partition key path '/category'. {str(container_err)}")
+            _init_error = f"Error initializing product container '{settings.COSMOS_CONTAINER}': {str(container_err)}"
+            logging.error(_init_error)
+            raise Exception(_init_error)
 
         try:
             _history_container = await database.create_container_if_not_exists(
                 id=settings.COSMOS_HISTORY_CONTAINER,
                 partition_key=PartitionKey(path="/userId")
             )
+            logging.info(f"Container ready: {settings.COSMOS_HISTORY_CONTAINER}")
         except Exception as history_err:
-            logging.error(f"Error initializing history container: {str(history_err)}")
-            raise Exception(f"Failed to access history container '{settings.COSMOS_HISTORY_CONTAINER}'. Check partition key path '/userId'. {str(history_err)}")
+            _init_error = f"Error initializing history container '{settings.COSMOS_HISTORY_CONTAINER}': {str(history_err)}"
+            logging.error(_init_error)
+            raise Exception(_init_error)
 
         _init_error = None
         logging.info(f"Async Cosmos DB initialization complete.")

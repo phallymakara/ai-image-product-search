@@ -46,6 +46,10 @@ class IndexService:
         self.product_ids = []
         logging.info("Created new empty FAISS index.")
 
+    def clear_index(self):
+        """Clears the current index in memory."""
+        self._create_new_index()
+
     def save_index(self):
         """Saves the FAISS index and product ID mapping to disk."""
         try:
@@ -73,16 +77,24 @@ class IndexService:
         """Searches for the top K similar products."""
         if self.index.ntotal == 0:
             return []
+        
+        if not query_vector or len(query_vector) != self.dimension:
+            logging.error(f"Invalid query vector dimension: {len(query_vector) if query_vector else 0}. Expected {self.dimension}")
+            return []
 
-        query_np = np.array([query_vector]).astype('float32')
-        distances, indices = self.index.search(query_np, top_k)
-        
-        results = []
-        for i, idx in enumerate(indices[0]):
-            if idx != -1 and idx < len(self.product_ids):
-                results.append((self.product_ids[idx], float(distances[0][i])))
-        
-        return results
+        try:
+            query_np = np.array([query_vector]).astype('float32')
+            distances, indices = self.index.search(query_np, top_k)
+            
+            results = []
+            for i, idx in enumerate(indices[0]):
+                if idx != -1 and idx < len(self.product_ids):
+                    results.append((self.product_ids[idx], float(distances[0][i])))
+            
+            return results
+        except Exception as e:
+            logging.error(f"FAISS search failed: {str(e)}")
+            return []
 
     def remove_product(self, product_id: str):
         """
