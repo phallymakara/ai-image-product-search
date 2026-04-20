@@ -80,6 +80,7 @@ async def search_similar_product(
     # Fetch ONLY the semantic candidates from Cosmos DB
     db_results = await get_products_by_ids(container, list(vector_map.keys()))
     
+    scored_products = []
     for product in db_results:
         pid = product.get("productId")
         v_score = vector_map.get(pid, 0.0)
@@ -88,17 +89,27 @@ async def search_similar_product(
         product["match_score"] = score_product_by_image(
             product, search_tags, search_brands, ocr_text, vector_score=v_score
         )
+        scored_products.append(product)
+
+    # Deduplicate by productId (keep highest score)
+    unique_products = {}
+    for p in scored_products:
+        pid = p["productId"]
+        if pid not in unique_products or p["match_score"] > unique_products[pid]["match_score"]:
+            unique_products[pid] = p
+    
+    final_results = list(unique_products.values())
 
     # 5. FILTER & RANKING
     # Filter by category if requested by user
     if category:
-        db_results = [p for p in db_results if p.get("category", "").lower() == category.lower()]
+        final_results = [p for p in final_results if p.get("category", "").lower() == category.lower()]
 
     # Sort by the final combined score
-    db_results.sort(key=lambda x: x["match_score"], reverse=True)
+    final_results.sort(key=lambda x: x["match_score"], reverse=True)
     
-    top_matches = db_results[:15]
-    total_results = len(db_results)
+    top_matches = final_results[:15]
+    total_results = len(final_results)
     
     # Cleanup Cosmos internal fields
     for m in top_matches:
@@ -193,14 +204,25 @@ async def search_by_text(
         logging.error(f"Text search keyword query failed: {str(e)}")
 
     # 4. Scoring & Ranking
+    scored_products = []
     for product in db_results:
         pid = product.get("productId")
         v_score = vector_map.get(pid, 0.0)
         product["match_score"] = score_product_by_text(product, query_lower, vector_score=v_score)
+        scored_products.append(product)
 
-    db_results.sort(key=lambda x: x["match_score"], reverse=True)
-    top_matches = db_results[:limit]
-    total_results = len(db_results)
+    # Deduplicate by productId (keep highest score)
+    unique_products = {}
+    for p in scored_products:
+        pid = p["productId"]
+        if pid not in unique_products or p["match_score"] > unique_products[pid]["match_score"]:
+            unique_products[pid] = p
+    
+    final_results = list(unique_products.values())
+    final_results.sort(key=lambda x: x["match_score"], reverse=True)
+    
+    top_matches = final_results[:limit]
+    total_results = len(final_results)
     
     for m in top_matches:
         for key in ["_rid", "_self", "_etag", "_attachments", "_ts"]:

@@ -31,6 +31,9 @@ async def backfill_vectors():
     logging.info("Starting vector backfill process...")
     
     try:
+        # Clear existing index to avoid duplicates
+        index_service.clear_index()
+        
         # 1. Fetch all products
         items = container.query_items(
             query="SELECT c.id, c.productId, c.imageUrl FROM c"

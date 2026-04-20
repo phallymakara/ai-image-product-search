@@ -12,26 +12,30 @@ class VectorService:
         self.model = None
         self.preprocess = None
         self.tokenizer = None
-        self._load_model()
+        self.is_ready = False
+        try:
+            self._load_model()
+            self.is_ready = True
+        except Exception as e:
+            logging.error(f"Critical error during VectorService initialization: {str(e)}")
 
     def _load_model(self):
         """Loads the CLIP model into memory."""
-        try:
-            logging.info(f"Loading CLIP model {settings.CLIP_MODEL_NAME}...")
-            self.model, _, self.preprocess = open_clip.create_model_and_transforms(
-                settings.CLIP_MODEL_NAME, 
-                pretrained=settings.CLIP_PRETRAINED_DATASET
-            )
-            self.model.to(self.device)
-            self.model.eval()
-            self.tokenizer = open_clip.get_tokenizer(settings.CLIP_MODEL_NAME)
-            logging.info("CLIP model loaded successfully.")
-        except Exception as e:
-            logging.error(f"Failed to load CLIP model: {str(e)}")
-            raise e
+        logging.info(f"Loading CLIP model {settings.CLIP_MODEL_NAME}...")
+        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+            settings.CLIP_MODEL_NAME, 
+            pretrained=settings.CLIP_PRETRAINED_DATASET
+        )
+        self.model.to(self.device)
+        self.model.eval()
+        self.tokenizer = open_clip.get_tokenizer(settings.CLIP_MODEL_NAME)
+        logging.info("CLIP model loaded successfully.")
 
     def get_image_embedding(self, image_bytes: bytes) -> List[float]:
         """Generates a normalized vector embedding for an image."""
+        if not self.is_ready or not self.model:
+            logging.error("VectorService not ready. Model not loaded.")
+            return []
         try:
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
             image_input = self.preprocess(image).unsqueeze(0).to(self.device)
@@ -48,6 +52,9 @@ class VectorService:
 
     def get_text_embedding(self, text: str) -> List[float]:
         """Generates a normalized vector embedding for text."""
+        if not self.is_ready or not self.model or not self.tokenizer:
+            logging.error("VectorService not ready. Model or Tokenizer not loaded.")
+            return []
         try:
             text_input = self.tokenizer([text]).to(self.device)
             
@@ -63,6 +70,8 @@ class VectorService:
 
     def classify_image(self, image_bytes: bytes, categories: List[str]) -> str:
         """Performs zero-shot classification on an image."""
+        if not self.is_ready or not self.model or not self.tokenizer:
+            return "uncategorized"
         if not categories:
             return "uncategorized"
             
