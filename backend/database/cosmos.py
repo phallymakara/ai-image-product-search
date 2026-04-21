@@ -44,12 +44,37 @@ async def init_cosmos():
         logging.info(f"Database ready: {settings.COSMOS_DATABASE}")
 
         # Attempt to get or create containers
+        # NOTE: Vector search requires special container policies at creation time.
+        vector_embedding_policy = {
+            "vectorEmbeddings": [
+                {
+                    "path": "/vector",
+                    "dataType": "float32",
+                    "distanceFunction": "cosine",
+                    "dimensions": settings.VECTOR_DIMENSION
+                }
+            ]
+        }
+        
+        indexing_policy = {
+            "vectorIndexes": [
+                {
+                    "path": "/vector",
+                    "type": "diskANN" 
+                }
+            ]
+        }
+
         try:
+            # We use a new container name for vector search as policies cannot be added to existing containers
+            container_id = settings.COSMOS_CONTAINER
             _container = await database.create_container_if_not_exists(
-                id=settings.COSMOS_CONTAINER,
-                partition_key=PartitionKey(path="/category")
+                id=container_id,
+                partition_key=PartitionKey(path="/category"),
+                vector_embedding_policy=vector_embedding_policy,
+                indexing_policy=indexing_policy
             )
-            logging.info(f"Container ready: {settings.COSMOS_CONTAINER}")
+            logging.info(f"Container ready: {container_id} (Vector Search Enabled)")
         except Exception as container_err:
             _init_error = f"Error initializing product container '{settings.COSMOS_CONTAINER}': {str(container_err)}"
             logging.error(_init_error)

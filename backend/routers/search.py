@@ -39,9 +39,7 @@ async def search_similar_product(
     blob_client = Depends(get_blob_client)
 ):
     """
-    Semantic Image-based product search:
-    1. CLIP Vector Retrieval (Semantic)
-    2. Azure Vision Analysis (Contextual Re-ranking)
+    Semantic Image-based product search using Cosmos DB Vector Search.
     """
     if not container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
@@ -57,18 +55,12 @@ async def search_similar_product(
     # 1. Upload for history
     search_image_url = upload_search_image(file_bytes, search_id, user_id, blob_client)
 
-    # 2. SEMANTIC RETRIEVAL (CLIP + FAISS)
-    # This replaces the broad SQL keyword search
+    # 2. Vector Embedding Generation
     image_vector = vector_service.get_image_embedding(file_bytes)
-    vector_results = index_service.search(image_vector, top_k=40)
-    
-    if not vector_results:
-        return {"message": "No visually similar products found", "results": [], "searchId": search_id}
-        
-    vector_map = {pid: score for pid, score in vector_results}
-    
+    if not image_vector:
+        raise HTTPException(status_code=500, detail="Failed to generate image vector")
+
     # 3. CONTEXTUAL ANALYSIS (Azure Vision)
-    # Used for boosting results with specific OCR text or Brands
     analysis_result = analyze_image(file_bytes)
     ocr_text = ocr_image(file_bytes).lower()
     search_tags_data = extract_tags(analysis_result)
@@ -76,44 +68,49 @@ async def search_similar_product(
     search_brands = [b.lower() for b in extract_brands(analysis_result)]
     detected_category = detect_category(analysis_result, search_tags_data)
 
-    # 4. FETCH & HYBRID SCORING
-    # Fetch ONLY the semantic candidates from Cosmos DB
-    db_results = await get_products_by_ids(container, list(vector_map.keys()))
-    
-    scored_products = []
-    for product in db_results:
-        pid = product.get("productId")
-        v_score = vector_map.get(pid, 0.0)
-        
-        # Apply the weighted scoring logic (Vector + Tags + OCR + Brand)
-        product["match_score"] = score_product_by_image(
-            product, search_tags, search_brands, ocr_text, vector_score=v_score
-        )
-        scored_products.append(product)
+    # 4. COSMOS DB VECTOR SEARCH
+    query_parts = [
+        "SELECT TOP 40 c.id, c.productId, c.name, c.category, c.tags, c.brands, c.ocr_text, c.imageUrl, c.userId, "
+        "VectorDistance(c.vector, @dist) AS vector_score FROM c "
+    ]
+    parameters = [{"name": "@dist", "value": image_vector}]
 
-    # Deduplicate by productId (keep highest score)
-    unique_products = {}
-    for p in scored_products:
-        pid = p["productId"]
-        if pid not in unique_products or p["match_score"] > unique_products[pid]["match_score"]:
-            unique_products[pid] = p
-    
-    final_results = list(unique_products.values())
-
-    # 5. FILTER & RANKING
-    # Filter by category if requested by user
     if category:
-        final_results = [p for p in final_results if p.get("category", "").lower() == category.lower()]
+        query_parts.append("WHERE STRINGEQUALS(c.category, @category, true) ")
+        parameters.append({"name": "@category", "value": category})
 
-    # Sort by the final combined score
-    final_results.sort(key=lambda x: x["match_score"], reverse=True)
+    query_parts.append("ORDER BY VectorDistance(c.vector, @dist)")
     
+    try:
+        items = container.query_items(query=" ".join(query_parts), parameters=parameters)
+        db_results = [item async for item in items]
+    except Exception as e:
+        logging.error(f"Cosmos DB vector search failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Vector search failed")
+
+    # 5. HYBRID SCORING & DEDUPLICATION
+    unique_products = {}
+    for product in db_results:
+        pid = product["productId"]
+        v_score = product.get("vector_score", 0.0)
+        
+        # Convert vector score (distance) to similarity (0 to 1)
+        # Note: VectorDistance for cosine returns (1 - cosine_similarity)
+        similarity = 1.0 - v_score
+        
+        product["match_score"] = score_product_by_image(
+            product, search_tags, search_brands, ocr_text, vector_score=similarity
+        )
+        
+        if pid not in unique_products or product["match_score"] > unique_products[pid]["match_score"]:
+            unique_products[pid] = product
+    
+    final_results = sorted(unique_products.values(), key=lambda x: x["match_score"], reverse=True)
     top_matches = final_results[:15]
     total_results = len(final_results)
-    
-    # Cleanup Cosmos internal fields
+
     for m in top_matches:
-        for key in ["_rid", "_self", "_etag", "_attachments", "_ts"]:
+        for key in ["_rid", "_self", "_etag", "_attachments", "_ts", "vector"]:
             m.pop(key, None)
 
     # 6. HISTORY LOGGING
@@ -159,7 +156,7 @@ async def search_by_text(
     history_container = Depends(get_history_container)
 ):
     """
-    Hybrid Text-based product search: CLIP Vectors + Keyword Matching.
+    Hybrid Text-based search using Cosmos DB Vector Search.
     """
     if not container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
@@ -172,60 +169,71 @@ async def search_by_text(
 
     # 1. Vector Search (Text-to-Image)
     query_vector = vector_service.get_text_embedding(query_lower)
-    vector_results = index_service.search(query_vector, top_k=limit * 2)
-    vector_map = {pid: score for pid, score in vector_results}
     
-    # 2. Fetch Initial Candidates
-    db_results = await get_products_by_ids(container, list(vector_map.keys()))
-
-    # 3. Keyword Search
+    # 2. COSMOS DB VECTOR SEARCH
     query_parts = [
-        "SELECT * FROM c WHERE (CONTAINS(LOWER(c.name), @query) OR CONTAINS(LOWER(c.ocr_text), @query) "
-        "OR EXISTS(SELECT VALUE t FROM t IN c.tags WHERE CONTAINS(LOWER(t.name), @query)) "
-        "OR EXISTS(SELECT VALUE b FROM b IN c.brands WHERE CONTAINS(LOWER(b), @query)))"
+        "SELECT TOP @limit c.id, c.productId, c.name, c.category, c.tags, c.brands, c.ocr_text, c.imageUrl, c.userId, "
+        "VectorDistance(c.vector, @dist) AS vector_score FROM c "
     ]
-    parameters = [{"name": "@query", "value": query_lower}]
+    parameters = [
+        {"name": "@dist", "value": query_vector},
+        {"name": "@limit", "value": limit * 2}
+    ]
 
     if category:
-        query_parts.append("AND STRINGEQUALS(c.category, @category, true)")
+        query_parts.append("WHERE STRINGEQUALS(c.category, @category, true) ")
         parameters.append({"name": "@category", "value": category})
+
+    query_parts.append("ORDER BY VectorDistance(c.vector, @dist)")
 
     try:
         items = container.query_items(query=" ".join(query_parts), parameters=parameters)
-        keyword_results = [item async for item in items]
-        
-        # Merge keyword results
-        existing_ids = {p["productId"] for p in db_results}
-        for p in keyword_results:
-            if p["productId"] not in existing_ids:
-                db_results.append(p)
-                
+        db_results = [item async for item in items]
     except Exception as e:
-        logging.error(f"Text search keyword query failed: {str(e)}")
+        logging.error(f"Cosmos DB text vector search failed: {str(e)}")
+        db_results = []
 
-    # 4. Scoring & Ranking
-    scored_products = []
+    # 3. KEYWORD SEARCH (Fallback / Hybrid)
+    keyword_query = (
+        "SELECT * FROM c WHERE (CONTAINS(LOWER(c.name), @query) OR CONTAINS(LOWER(c.ocr_text), @query) "
+        "OR EXISTS(SELECT VALUE t FROM t IN c.tags WHERE CONTAINS(LOWER(t.name), @query)) "
+        "OR EXISTS(SELECT VALUE b FROM b IN c.brands WHERE CONTAINS(LOWER(b), @query)))"
+    )
+    keyword_params = [{"name": "@query", "value": query_lower}]
+    if category:
+        keyword_query += " AND STRINGEQUALS(c.category, @category, true)"
+        keyword_params.append({"name": "@category", "value": category})
+
+    try:
+        kw_items = container.query_items(query=keyword_query, parameters=keyword_params)
+        keyword_results = [item async for item in kw_items]
+        
+        # Merge keyword results into db_results
+        existing_pids = {p["productId"] for p in db_results}
+        for p in keyword_results:
+            if p["productId"] not in existing_pids:
+                db_results.append(p)
+    except Exception as e:
+        logging.error(f"Text keyword search failed: {str(e)}")
+
+    # 4. SCORING & DEDUPLICATION
+    unique_products = {}
     for product in db_results:
         pid = product.get("productId")
-        v_score = vector_map.get(pid, 0.0)
-        product["match_score"] = score_product_by_text(product, query_lower, vector_score=v_score)
-        scored_products.append(product)
+        v_dist = product.get("vector_score", 1.0) # Default to 1.0 distance (0 similarity)
+        similarity = 1.0 - v_dist if "vector_score" in product else 0.0
+        
+        product["match_score"] = score_product_by_text(product, query_lower, vector_score=similarity)
+        
+        if pid not in unique_products or product["match_score"] > unique_products[pid]["match_score"]:
+            unique_products[pid] = product
 
-    # Deduplicate by productId (keep highest score)
-    unique_products = {}
-    for p in scored_products:
-        pid = p["productId"]
-        if pid not in unique_products or p["match_score"] > unique_products[pid]["match_score"]:
-            unique_products[pid] = p
-    
-    final_results = list(unique_products.values())
-    final_results.sort(key=lambda x: x["match_score"], reverse=True)
-    
+    final_results = sorted(unique_products.values(), key=lambda x: x["match_score"], reverse=True)
     top_matches = final_results[:limit]
     total_results = len(final_results)
     
     for m in top_matches:
-        for key in ["_rid", "_self", "_etag", "_attachments", "_ts"]:
+        for key in ["_rid", "_self", "_etag", "_attachments", "_ts", "vector"]:
             m.pop(key, None)
 
     # 5. History Logging
