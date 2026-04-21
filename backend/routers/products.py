@@ -160,31 +160,53 @@ async def get_product(
     container = Depends(get_product_container)
 ):
     """
-    Retrieves a single product by its ID.
-    If category is provided, it uses a direct lookup (efficient).
-    If not, it performs a cross-partition query.
+    Retrieves a single product by its ID or productId.
     """
+    logging.info(f"API CALL: get_product ID={product_id}, CAT={category}")
     if not container:
         raise HTTPException(status_code=500, detail="Database connection not initialized")
     
     try:
-        if category:
-            # Direct lookup (very fast)
-            product = await container.read_item(item=product_id, partition_key=category)
-            return product
-        else:
-            # Fallback: Query by ID across all partitions
-            items = container.query_items(
-                query="SELECT * FROM c WHERE c.id = @id",
-                parameters=[{"name": "@id", "value": product_id}]
-            )
-            results = [item async for item in items]
-            if not results:
-                raise HTTPException(status_code=404, detail="Product not found")
+        # 1. Try direct lookup if category is provided
+        if category and category.strip():
+            try:
+                product = await container.read_item(item=product_id, partition_key=category)
+                logging.info(f"Found product via read_item: {product_id}")
+                return product
+            except Exception:
+                logging.warning(f"read_item failed for {product_id} in {category}, falling back to query")
+
+        # 2. Query by 'id' across all partitions
+        query = "SELECT * FROM c WHERE c.id = @id"
+        items = container.query_items(
+            query=query,
+            parameters=[{"name": "@id", "value": product_id}]
+        )
+        results = [item async for item in items]
+        if results:
+            logging.info(f"Found product via c.id: {product_id}")
             return results[0]
-    except Exception as e:
-        logging.error(f"Failed to fetch product {product_id}: {str(e)}")
+
+        # 3. Query by 'productId' fallback
+        query = "SELECT * FROM c WHERE c.productId = @id"
+        items = container.query_items(
+            query=query,
+            parameters=[{"name": "@id", "value": product_id}]
+        )
+        results = [item async for item in items]
+        if results:
+            logging.info(f"Found product via c.productId: {product_id}")
+            return results[0]
+
+        # 4. Not found
+        logging.warning(f"Product {product_id} not found after all attempts.")
         raise HTTPException(status_code=404, detail="Product not found")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"CRITICAL ERROR in get_product: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @router.patch("/products/{product_id}", response_model=ProductResponse)

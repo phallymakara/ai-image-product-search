@@ -62,19 +62,18 @@ async def backfill_vectors():
                 vector = vector_service.get_image_embedding(response.content)
                 
                 if vector:
-                    # 4. Add to FAISS
-                    index_service.add_product(product_id, vector)
+                    # 4. Save Vector to Cosmos DB
+                    product["vector"] = vector
+                    await container.upsert_item(product)
                     count += 1
                 
             except Exception as e:
                 logging.error(f"Error indexing product {product_id}: {str(e)}")
 
-        # 5. Save the index
         if count > 0:
-            index_service.save_index()
-            logging.info(f"Successfully indexed {count} products.")
+            logging.info(f"Successfully migrated {count} product vectors to Cosmos DB.")
         else:
-            logging.info("No products were indexed.")
+            logging.info("No products were updated.")
 
     except Exception as e:
         logging.error(f"Backfill failed: {str(e)}")

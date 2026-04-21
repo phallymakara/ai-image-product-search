@@ -15,6 +15,7 @@ class ProductBase(BaseModel):
     ocr_text: Optional[str] = None
     imageUrl: Optional[str] = None
     userId: str
+    vector: Optional[List[float]] = None
 
 
 class ProductCreate(ProductBase):

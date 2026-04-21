@@ -110,23 +110,18 @@ async def upload_image(
         "imageUrl": "",  # Will be updated after blob upload
         "userId": user_id,
         "enhanced_search": True,
-        "upload_source": "api"
+        "upload_source": "api",
+        "vector": vector
     }
 
     try:
         await container.upsert_item(product_data)
-        logging.info(f"Product {product_id} saved to Cosmos DB")
+        logging.info(f"Product {product_id} saved to Cosmos DB (with vector)")
     except Exception as e:
         logging.error(f"Database save failed for {product_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Database save failed: {str(e)}")
 
-    # 5. Add to Vector Index
-    if vector:
-        index_service.add_product(product_id, vector)
-        index_service.save_index()
-        logging.info(f"Product {product_id} added to FAISS index")
-
-    # 6. Upload to Storage
+    # 5. Upload to Storage
     try:
         image_url = upload_to_blob(file_bytes, product_id, user_id, blob_client)
         product_data["imageUrl"] = image_url
